@@ -1,4 +1,4 @@
-# tarklone
+# tarklone 1.0
 
 Bidirektionaler Ordner-Sync zwischen Windows und [Tarkle](https://tarkle.com) – als Tray-App.
 
