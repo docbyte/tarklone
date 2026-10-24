@@ -118,12 +118,32 @@ python -m venv .venv
 
 ## Windows-EXE bauen
 
+### Standard-Build
+
 ```powershell
 .\build.ps1
 ```
 
 Ergebnis: `dist\tarklone.exe`. Die EXE startet ohne Konsolenfenster direkt als Tray-App.
 Der Autostart-Eintrag zeigt bei einer gebauten EXE auf diese Datei.
+
+### Single-EXE-Variante
+
+Für eine explizit reproduzierbare Variante mit eigener PyInstaller-Spec und
+Windows-Versionsinformationen:
+
+```powershell
+.\build-onefile.ps1
+```
+
+Ergebnis: **`dist\tarklone-single.exe`** – genau eine Datei, gleicher Funktionsumfang,
+ohne Python-Installation oder zusätzliche Ordner. Die Spec liegt unter
+`packaging\tarklone-onefile.spec`, die Versionsdaten unter
+`packaging\version_info.txt`.
+
+Beide Builds erzeugen eine einzelne EXE. Die Single-EXE-Variante ist die empfohlene
+Datei zum Weitergeben; sie enthält Tcl/Tk, Tray-Icon, Watchdog und den
+Windows-Credential-Manager-Backend explizit im Bundle.
 
 ## Bekannte Einschränkungen
 
