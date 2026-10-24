@@ -1,1 +1,139 @@
 # tarklone
+
+Bidirektionaler Ordner-Sync zwischen Windows und [Tarkle](https://tarkle.com) – als Tray-App.
+
+> **Wichtig:** Tarkle hat derzeit noch keine öffentliche API. Developer API, WebDAV/rclone und die
+> Mac-App sind auf tarkle.com als „Soon“ markiert. tarklone nutzt deshalb den normalen
+> Browser-Login (Supabase OAuth mit PKCE) sowie die offizielle MCP-Beta unter
+> `https://mcp.tarklesend.com/mcp` und die interne Web-API der Tarkle-App. Die Anbindung ist
+> inoffiziell und kann sich ändern.
+
+## Funktionen
+
+- Browser-Login bei Tarkle, ohne Passwort im Programm zu speichern
+- Zugriffstoken im Windows Credential Manager
+- Workspace-Auswahl direkt im Einrichtungsfenster
+- Bidirektionaler Sync eines lokalen Ordners mit dem Workspace-Root oder einem Remote-Ordnerpfad
+- Dateien und Unterordner in beide Richtungen
+- Konfliktkopien statt Überschreiben (`Name (Konflikt PC Zeitstempel).ext`)
+- Löschungen standardmäßig **nicht** übertragen; lokale Löschungen landen in `.tarklone/trash`
+- Tray-App mit Status, manuellem Sync, Pause und Einstellungen
+- Hintergrund-Sync per Zeitintervall und Dateiüberwachung (`watchdog`)
+- Schutz vor Pfad-Traversal und versehentlichem Löschen
+
+## Installation (Entwicklung)
+
+```powershell
+cd C:\Users\M\code\tarklone
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
+```
+
+## Erste Einrichtung
+
+1. Bei Tarkle anmelden:
+
+   ```powershell
+   .\.venv\Scripts\tarklone.exe login
+   ```
+
+   Der Browser öffnet den Tarkle-Login. Nach der Bestätigung kehrt der Callback nach
+   `127.0.0.1` zurück. Das Token wird im Windows Credential Manager gespeichert.
+
+2. Tray-App starten:
+
+   ```powershell
+   .\.venv\Scripts\tarklone.exe tray
+   ```
+
+   Beim ersten Start öffnet sich das Einrichtungsfenster:
+
+   - lokalen Ordner auswählen
+   - Tarkle-Workspace aus der Liste wählen (nach dem Login automatisch geladen)
+   - optional einen Remote-Ordnerpfad eintragen, z. B. `Kunden/Projekt`
+     (leer = Workspace-Root)
+   - Sync-Intervall und Löschverhalten festlegen
+
+   Danach läuft tarklone im Infobereich. Ein Doppelklick auf das Symbol startet einen Sync;
+   das Kontextmenü bietet Einstellungen, Pause, Ordner öffnen und Protokoll öffnen.
+
+## Kommandozeile
+
+```powershell
+# Einmaliger Sync
+.\.venv\Scripts\tarklone.exe sync --verbose
+
+# Nur anzeigen, was passieren würde
+.\.venv\Scripts\tarklone.exe sync --dry-run --verbose
+
+# Alternativer Workspace / Remote-Ordner
+.\.venv\Scripts\tarklone.exe sync --workspace <ID> --folder "Kunden/Projekt"
+```
+
+## Konfiguration
+
+| Datei | Pfad |
+|---|---|
+| Einstellungen | `%LOCALAPPDATA%\docbyte\tarklone\config.json` |
+| Zustand/Sync-Datenbank | `%LOCALAPPDATA%\docbyte\tarklone\state.sqlite3` |
+| Protokoll | `%LOCALAPPDATA%\docbyte\tarklone\Logs\tarklone.log` |
+| Zugriffstoken | Windows Credential Manager, Dienst `tarklone` |
+
+## Sync-Verhalten
+
+- **Beidseitig vorhanden, nur eine Seite geändert:** die geänderte Seite wird übertragen.
+- **Beide Seiten geändert:** die Remote-Fassung bleibt am Originalpfad, die lokale Fassung
+  wird als Konfliktkopie gesichert und zusätzlich hochgeladen.
+- **Nur auf einer Seite vorhanden:** wird auf die andere Seite übertragen.
+- **Lokal gelöscht:** ohne „Löschungen übertragen“ wird die Datei aus Tarkle wiederhergestellt;
+  mit der Option wird sie remote in den Papierkorb verschoben. Lokale Löschungen werden zuerst
+  nach `.tarklone/trash/<Zeitstempel>/` verschoben.
+- **Remote gelöscht:** ohne „Löschungen übertragen“ wird die Datei wieder hochgeladen;
+  mit der Option wird sie lokal in den Papierkorb verschoben.
+
+### Free- und Pro-Plan
+
+- **Pro:** geänderte Dateien werden über die Tarkle-Dateiversionierung aktualisiert.
+- **Free:** Dateiversionierung ist nicht verfügbar. tarklone verschiebt die alte Fassung in
+  den Tarkle-Papierkorb und lädt die neue Fassung unter demselben Namen hoch. Das ist
+  wiederherstellbar, erzeugt aber keine Versionshistorie.
+
+## Entwicklung
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m compileall -q src
+```
+
+### Aufbau
+
+- `src/tarklone/auth.py` – Supabase-OAuth (PKCE), Token-Refresh, Credential Manager
+- `src/tarklone/mcp.py` – MCP-Client (JSON-RPC, SSE, Sessions)
+- `src/tarklone/webapi.py` – Tarkle-Web-API: Session-Cookie, Dateiliste, Download, Upload, Papierkorb
+- `src/tarklone/tarkle.py` – Adapter: MCP-Workspaces + Web-API-Dateioperationen
+- `src/tarklone/sync.py` – Sync-Engine, Konflikte, Papierkorb, Pfadprüfung
+- `src/tarklone/state.py` – SQLite-Zustand
+- `src/tarklone/ui.py` – Einrichtungs- und Einstellungsfenster
+- `src/tarklone/app.py` – Tray-App, Scheduler, Dateiüberwachung
+
+## Windows-EXE bauen
+
+```powershell
+.\build.ps1
+```
+
+Ergebnis: `dist\tarklone.exe`. Die EXE startet ohne Konsolenfenster direkt als Tray-App.
+Der Autostart-Eintrag zeigt bei einer gebauten EXE auf diese Datei.
+
+## Bekannte Einschränkungen
+
+- Die Tarkle-MCP-Beta muss für den Workspace freigeschaltet sein.
+- Ohne öffentliche API können sich Endpunkte und HTML-Strukturen ändern.
+- Die rekursive Remote-Liste wird aus den servergerenderten Tarkle-Seiten gelesen; das ist
+  die derzeit einzige Möglichkeit, Unterordner zuverlässig zu erkennen.
+- Leere lokale Ordner werden remote nicht angelegt (Tarkle legt Ordner beim ersten Upload an).
+- Sehr große Dateien, die beim Update einen Multipart-Upload benötigen, werden noch nicht
+  unterstützt. Neue Uploads und Downloads großer Dateien funktionieren, solange Tarkle sie
+  über die normale Presign-Route annimmt.
+- Der Sync ist ein Datei-Sync, kein Bieterverfahren: Bei gleichzeitigen Änderungen werden
+  Konfliktkopien erzeugt, nichts wird still überschrieben.
