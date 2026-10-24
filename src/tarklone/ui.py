@@ -70,9 +70,26 @@ class SetupDialog(tk.Toplevel):
         self._refresh_login_state()
         self.after(100, self._poll_ui_queue)
         _center(self)
-        self.transient(master)
-        self.grab_set()
+        # Das Hauptfenster der Tray-App ist withdrawn. Ein transient-Fenster
+        # würde darunter ebenfalls unsichtbar bleiben, daher eigenständig
+        # anzeigen und den Grab erst nach dem Mapping setzen.
+        self.deiconify()
+        self.lift()
         self.focus_force()
+        self.after(100, self._activate_grab)
+
+    def _activate_grab(self) -> None:
+        try:
+            if self.winfo_exists() and self.winfo_viewable():
+                self.grab_set()
+        except tk.TclError:
+            pass
+
+    def _release_grab(self) -> None:
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
 
     def _build(self) -> None:
         outer = tk.Frame(self, bg=BACKGROUND)
@@ -433,7 +450,7 @@ class SetupDialog(tk.Toplevel):
         save_settings(self.settings)
         apply_launch_at_login(self.settings.launch_at_login)
         self._closed = True
-        self.grab_release()
+        self._release_grab()
         self.destroy()
         self.on_saved(self.settings)
 
@@ -445,7 +462,7 @@ class SetupDialog(tk.Toplevel):
         ):
             return
         self._closed = True
-        self.grab_release()
+        self._release_grab()
         self.destroy()
         if self.on_cancel:
             self.on_cancel()
