@@ -144,6 +144,15 @@ class TarkleRemote:
         item = self._find_item(entry)
         self.web.download_to(item, self.settings.workspace_id, destination)
 
+    def download_range(self, entry: RemoteEntry, start: int, length: int) -> bytes:
+        item = self._find_item(entry)
+        return self.web.download_range(
+            item,
+            self.settings.workspace_id,
+            start,
+            length,
+        )
+
     def upload(
         self,
         local_path: Path,

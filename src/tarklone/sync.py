@@ -37,6 +37,10 @@ class RemoteEntry:
     entry_id: str = ""
     content_hash: str = ""
     parent_id: str = ""
+    # Für transparent verschlüsselte Dateien: Größe des Klartexts. ``size``
+    # bleibt die Größe des tatsächlich übertragenen Blobs (Ciphertext).
+    # None bedeutet: keine abweichende logische Größe vorhanden.
+    logical_size: int | None = None
 
 
 @dataclass
@@ -277,7 +281,12 @@ class SyncEngine:
 
     @staticmethod
     def _content_equal(local: LocalEntry, remote: RemoteEntry) -> bool:
-        if local.size != remote.size:
+        remote_size = (
+            remote.logical_size
+            if remote.logical_size is not None
+            else remote.size
+        )
+        if local.size != remote_size:
             return False
         if remote.content_hash and local.content_hash:
             return remote.content_hash.lower() == local.content_hash.lower()

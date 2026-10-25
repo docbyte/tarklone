@@ -19,6 +19,8 @@ from watchdog.events import FileSystemEventHandler
 from . import __version__
 from .auth import AuthError, NotLoggedIn, OAuthClient, TokenStore
 from .config import ensure_dirs, load_settings, log_path, state_path
+from .crypto import KEYFILE_NAME, EncryptionManager
+from .encrypted_remote import EncryptionAdapter
 from .state import SyncState
 from .sync import RemoteUnsupported, SyncBusy, SyncEngine, SyncError
 from .ui import SetupDialog
@@ -375,7 +377,39 @@ class TarkloneApp:
             finally:
                 oauth.close()
 
-            adapter = TarkleRemote(self.settings, token)
+            local_root = Path(self.settings.local_folder)
+            encryption = EncryptionManager(local_root)
+            encryption.load_cached_key()
+            if encryption.enabled and not encryption.unlocked:
+                self._set_status("Verschlüsselung gesperrt", error=True)
+                logger.warning(
+                    "Der encrypted-Ordner ist gesperrt; bitte das Passwort eingeben."
+                )
+                self._notify(
+                    "Bitte das Passwort für den encrypted-Ordner in den Einstellungen eingeben.",
+                    "tarklone – Verschlüsselung",
+                )
+                if self.root:
+                    self._ui_queue.put(lambda: self.show_settings(first_run=False))
+                return
+            if not encryption.enabled:
+                encrypted_dir = local_root / "encrypted"
+                if encrypted_dir.is_dir() and any(
+                    path.is_file() and path.name != KEYFILE_NAME
+                    for path in encrypted_dir.rglob("*")
+                ):
+                    self._set_status("Verschlüsselung nicht eingerichtet", error=True)
+                    self._notify(
+                        "Der Ordner encrypted enthält Dateien, aber es ist kein "
+                        "Passwort gesetzt. Bitte zuerst ein Passwort festlegen.",
+                        "tarklone – Verschlüsselung",
+                    )
+                    if self.root:
+                        self._ui_queue.put(lambda: self.show_settings(first_run=False))
+                    return
+
+            remote = TarkleRemote(self.settings, token)
+            adapter = EncryptionAdapter(remote, encryption)
             engine = SyncEngine(
                 Path(self.settings.local_folder),
                 adapter,
@@ -388,6 +422,16 @@ class TarkloneApp:
             )
             result = engine.sync()
             self.last_sync = time.time()
+            if not encryption.enabled and (
+                local_root / "encrypted" / KEYFILE_NAME
+            ).is_file():
+                self._notify(
+                    "Verschlüsselter Ordner erkannt. Bitte das Passwort in den "
+                    "Einstellungen eingeben.",
+                    "tarklone – Verschlüsselung",
+                )
+                if self.root:
+                    self._ui_queue.put(lambda: self.show_settings(first_run=False))
             if result.errors:
                 self._set_status(f"Sync mit {len(result.errors)} Fehler(n)", error=True)
                 logger.warning("Sync-Fehler: %s", "; ".join(result.errors[:5]))

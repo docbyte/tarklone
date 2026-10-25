@@ -158,6 +158,10 @@ def cmd_init(_args: argparse.Namespace) -> int:
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
+    import getpass
+
+    from .crypto import CryptoError, EncryptionManager
+    from .encrypted_remote import EncryptionAdapter
     from .state import SyncState
     from .sync import SyncEngine, SyncError
     from .tarkle import TarkleRemote
@@ -184,11 +188,33 @@ def cmd_sync(args: argparse.Namespace) -> int:
     state = None
     try:
         token = oauth.ensure_valid()
+        encryption = EncryptionManager(Path(settings.local_folder))
+        encryption.load_cached_key()
+        if encryption.enabled and not encryption.unlocked:
+            password = getpass.getpass("Passwort für den encrypted-Ordner: ")
+            try:
+                encryption.unlock(password)
+            except CryptoError as exc:
+                print(f"Fehler: {exc}", file=sys.stderr)
+                return 2
+        if not encryption.enabled:
+            encrypted_dir = Path(settings.local_folder) / "encrypted"
+            if encrypted_dir.is_dir() and any(
+                path.is_file() and path.name != ".tarklone-key.json"
+                for path in encrypted_dir.rglob("*")
+            ):
+                print(
+                    "Fehler: Der Ordner encrypted enthält Dateien, aber es ist kein "
+                    "Passwort gesetzt. Bitte zuerst in der Tray-App ein Passwort festlegen.",
+                    file=sys.stderr,
+                )
+                return 2
         remote = TarkleRemote(settings, token)
+        adapter = EncryptionAdapter(remote, encryption)
         state = SyncState(state_path())
         engine = SyncEngine(
             Path(settings.local_folder),
-            remote,
+            adapter,
             state,
             sync_deletions=settings.sync_deletions,
             conflict_policy=settings.conflict_policy,

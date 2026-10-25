@@ -15,6 +15,8 @@ Bidirektionaler Ordner-Sync zwischen Windows und [Tarkle](https://tarkle.com) �
 - Workspace-Auswahl direkt im Einrichtungsfenster
 - Bidirektionaler Sync eines lokalen Ordners mit dem Workspace-Root oder einem Remote-Ordnerpfad
 - Dateien und Unterordner in beide Richtungen
+- Optionaler AES-256-GCM-Ordner `encrypted/`: lokal lesbar, in Tarkle verschlüsselt
+- Passwortgeschützter Master-Key; Passwortänderung ohne Neuverschlüsselung der Dateien
 - Konfliktkopien statt Überschreiben (`Name (Konflikt PC Zeitstempel).ext`)
 - Löschungen standardmäßig **nicht** übertragen; lokale Löschungen landen in `.tarklone/trash`
 - Tray-App mit Status, manuellem Sync, Pause und Einstellungen
@@ -78,6 +80,7 @@ python -m venv .venv
 | Zustand/Sync-Datenbank | `%LOCALAPPDATA%\docbyte\tarklone\state.sqlite3` |
 | Protokoll | `%LOCALAPPDATA%\docbyte\tarklone\Logs\tarklone.log` |
 | Zugriffstoken | Windows Credential Manager, Dienst `tarklone` |
+| Verschlüsselungs-Keyfile | `<Sync-Ordner>\encrypted\.tarklone-key.json` |
 
 ## Sync-Verhalten
 
@@ -90,6 +93,32 @@ python -m venv .venv
   nach `.tarklone/trash/<Zeitstempel>/` verschoben.
 - **Remote gelöscht:** ohne „Löschungen übertragen“ wird die Datei wieder hochgeladen;
   mit der Option wird sie lokal in den Papierkorb verschoben.
+
+### Verschlüsselter Ordner `encrypted/`
+
+In den Einstellungen kann ein Passwort für den Unterordner `encrypted/` gesetzt
+werden. Der Ordner wird beim Setzen des Passworts angelegt.
+
+- Lokal liegen die Dateien im Klartext und bleiben normal nutzbar.
+- Beim Upload werden sie mit **AES-256-GCM** verschlüsselt; in Tarkle liegt nur
+  Ciphertext.
+- Beim Download werden sie wieder entschlüsselt.
+- Das Passwort verpackt einen zufälligen 32-Byte-Master-Key. Die Dateien selbst
+  werden mit diesem Master-Key verschlüsselt; bei einer Passwortänderung wird
+  nur der Master-Key neu verpackt. **Dateien werden nicht neu verschlüsselt.**
+- Die Schlüsseldatei `encrypted/.tarklone-key.json` enthält nur den mit dem
+  Passwort verpackten Master-Key und wird mitgesynct. Sie ist nicht geheim,
+  aber ohne Passwort nicht entschlüsselbar.
+- Der Ordner muss beim erstmaligen Setzen des Passworts leer sein. Dateien, die
+  vorher unverschlüsselt in Tarkle unter `encrypted/` liegen, müssen entfernt
+  werden.
+- **Passwort verloren = Daten nicht entschlüsselbar.** Es gibt keine
+  Wiederherstellung ohne Passwort oder Schlüsseldatei.
+- Auf einem neuen Rechner wird die Schlüsseldatei beim ersten Sync
+  heruntergeladen. Danach in den Einstellungen das Passwort eingeben
+  (**Entsperren**); der nächste Sync entschlüsselt die Dateien.
+- Dateien nicht direkt über die Tarkle-Weboberfläche in `encrypted/` hochladen;
+  sie würden als Klartext an der Verschlüsselung vorbeigehen.
 
 ### Free- und Pro-Plan
 
@@ -155,5 +184,8 @@ Windows-Credential-Manager-Backend explizit im Bundle.
 - Sehr große Dateien, die beim Update einen Multipart-Upload benötigen, werden noch nicht
   unterstützt. Neue Uploads und Downloads großer Dateien funktionieren, solange Tarkle sie
   über die normale Presign-Route annimmt.
+- Die Verschlüsselung schützt die Daten in Tarkle, nicht den lokalen Klartext im Ordner
+  `encrypted/`. Für lokale At-Rest-Verschlüsselung müsste der Ordner anders eingebunden
+  werden (z. B. Cryptomator/ BitLocker).
 - Der Sync ist ein Datei-Sync, kein Bieterverfahren: Bei gleichzeitigen Änderungen werden
   Konfliktkopien erzeugt, nichts wird still überschrieben.

@@ -4,12 +4,13 @@ import queue
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Callable
 
 from . import __version__
 from .auth import OAuthClient, Token, TokenStore
 from .config import Settings, save_settings
+from .crypto import CryptoError, EncryptionManager
 
 PURPLE = "#714CB6"
 TEXT = "#17151F"
@@ -69,6 +70,8 @@ class SetupDialog(tk.Toplevel):
 
         self._build()
         self._refresh_login_state()
+        self._refresh_encryption_state()
+        self.local_var.trace_add("write", lambda *_: self._refresh_encryption_state())
         self.after(100, self._poll_ui_queue)
         _center(self)
         # Das Hauptfenster der Tray-App ist withdrawn. Ein transient-Fenster
@@ -255,6 +258,48 @@ class SetupDialog(tk.Toplevel):
             variable=self.launch_var,
         ).pack(anchor="w", pady=(2, 0))
 
+        encryption = tk.Frame(outer, bg=BACKGROUND)
+        encryption.pack(fill="x", pady=(14, 0))
+        tk.Label(
+            encryption,
+            text="Verschlüsselter Ordner (AES-256)",
+            bg=BACKGROUND,
+            fg=TEXT,
+            font=("Segoe UI", 10),
+            anchor="w",
+        ).pack(fill="x")
+        enc_row = tk.Frame(encryption, bg=BACKGROUND)
+        enc_row.pack(fill="x", pady=(3, 0))
+        self.encryption_status_label = tk.Label(
+            enc_row,
+            text="",
+            bg=BACKGROUND,
+            fg=MUTED,
+            font=("Segoe UI", 9),
+            anchor="w",
+        )
+        self.encryption_status_label.pack(side="left")
+        self.encryption_button = ttk.Button(
+            enc_row,
+            text="Passwort festlegen …",
+            command=self._encryption_action,
+            width=20,
+        )
+        self.encryption_button.pack(side="right")
+        tk.Label(
+            encryption,
+            text="Dateien unter encrypted/ werden beim Upload mit AES-256-GCM "
+            "verschlüsselt und beim Download entschlüsselt. Eine Passwortänderung "
+            "verpackt nur den Master-Key neu – Dateien werden nicht neu verschlüsselt. "
+            "Die Schlüsseldatei encrypted/.tarklone-key.json wird mitgesynct.",
+            bg=BACKGROUND,
+            fg=MUTED,
+            font=("Segoe UI", 8),
+            wraplength=520,
+            justify="left",
+            anchor="w",
+        ).pack(fill="x", pady=(3, 0))
+
         buttons = tk.Frame(outer, bg=BACKGROUND)
         buttons.pack(fill="x", pady=(18, 0))
         tk.Label(
@@ -369,6 +414,146 @@ class SetupDialog(tk.Toplevel):
             selected = values[0]
         if selected:
             self.workspace_display_var.set(selected)
+
+    def _encryption_manager(self) -> EncryptionManager | None:
+        local = self.local_var.get().strip()
+        if not local:
+            return None
+        path = Path(local)
+        if not path.is_dir():
+            return None
+        manager = EncryptionManager(path)
+        manager.load_cached_key()
+        return manager
+
+    def _refresh_encryption_state(self) -> None:
+        manager = self._encryption_manager()
+        if manager is None:
+            self.encryption_status_label.config(text="Lokalen Ordner auswählen.")
+            self.encryption_button.config(state="disabled")
+            return
+        self.encryption_button.config(state="normal")
+        if not manager.enabled:
+            self.encryption_status_label.config(text="Nicht eingerichtet.")
+            self.encryption_button.config(text="Passwort festlegen …")
+        elif manager.unlocked:
+            self.encryption_status_label.config(text="Aktiv – entsperrt.")
+            self.encryption_button.config(text="Passwort ändern …")
+        else:
+            self.encryption_status_label.config(text="Aktiv – gesperrt.")
+            self.encryption_button.config(text="Entsperren …")
+
+    def _set_encryption_password(self) -> None:
+        manager = self._encryption_manager()
+        if manager is None:
+            messagebox.showwarning(
+                "Verschlüsselung",
+                "Bitte zuerst einen gültigen lokalen Ordner auswählen.",
+                parent=self,
+            )
+            return
+        new = simpledialog.askstring(
+            "Passwort festlegen",
+            "Neues Passwort (mindestens 8 Zeichen):",
+            show="*",
+            parent=self,
+        )
+        if new is None:
+            return
+        confirm = simpledialog.askstring(
+            "Passwort bestätigen",
+            "Passwort wiederholen:",
+            show="*",
+            parent=self,
+        )
+        if new != confirm:
+            messagebox.showerror("Verschlüsselung", "Die Passwörter stimmen nicht überein.", parent=self)
+            return
+        try:
+            manager.set_password(new)
+        except CryptoError as exc:
+            messagebox.showerror("Verschlüsselung", str(exc), parent=self)
+            return
+        messagebox.showinfo(
+            "Verschlüsselung",
+            "Der Ordner „encrypted“ wurde erstellt.\n\n"
+            "Dateien darin werden ab jetzt beim Upload AES-256-verschlüsselt. "
+            "Die Schlüsseldatei wird mitgesynct.",
+            parent=self,
+        )
+        self._refresh_encryption_state()
+
+    def _unlock_encryption(self, manager: EncryptionManager) -> None:
+        password = simpledialog.askstring(
+            "Verschlüsselung entsperren",
+            "Passwort für den encrypted-Ordner:",
+            show="*",
+            parent=self,
+        )
+        if password is None:
+            return
+        try:
+            manager.unlock(password)
+        except CryptoError as exc:
+            messagebox.showerror("Verschlüsselung", str(exc), parent=self)
+            return
+        messagebox.showinfo("Verschlüsselung", "Der encrypted-Ordner ist entsperrt.", parent=self)
+        self._refresh_encryption_state()
+
+    def _change_encryption_password(self, manager: EncryptionManager) -> None:
+        old = simpledialog.askstring(
+            "Passwort ändern",
+            "Aktuelles Passwort:",
+            show="*",
+            parent=self,
+        )
+        if old is None:
+            return
+        new = simpledialog.askstring(
+            "Passwort ändern",
+            "Neues Passwort (mindestens 8 Zeichen):",
+            show="*",
+            parent=self,
+        )
+        if new is None:
+            return
+        confirm = simpledialog.askstring(
+            "Passwort ändern",
+            "Neues Passwort wiederholen:",
+            show="*",
+            parent=self,
+        )
+        if new != confirm:
+            messagebox.showerror("Verschlüsselung", "Die Passwörter stimmen nicht überein.", parent=self)
+            return
+        try:
+            manager.change_password(old, new)
+        except CryptoError as exc:
+            messagebox.showerror("Verschlüsselung", str(exc), parent=self)
+            return
+        messagebox.showinfo(
+            "Verschlüsselung",
+            "Das Passwort wurde geändert. Die vorhandenen Dateien wurden nicht "
+            "neu verschlüsselt; nur der Master-Key wurde neu verpackt.",
+            parent=self,
+        )
+        self._refresh_encryption_state()
+
+    def _encryption_action(self) -> None:
+        manager = self._encryption_manager()
+        if manager is None:
+            messagebox.showwarning(
+                "Verschlüsselung",
+                "Bitte zuerst einen gültigen lokalen Ordner auswählen.",
+                parent=self,
+            )
+            return
+        if not manager.enabled:
+            self._set_encryption_password()
+        elif not manager.unlocked:
+            self._unlock_encryption(manager)
+        else:
+            self._change_encryption_password(manager)
 
     def _login_async(self) -> None:
         if self._login_running:

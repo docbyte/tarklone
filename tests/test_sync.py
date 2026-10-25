@@ -248,6 +248,29 @@ def test_scanner_excludes_tarklone_and_patterns(tmp_path: Path) -> None:
     assert not any(path.startswith(".tarklone") for path in entries)
 
 
+def test_logical_size_is_used_for_encrypted_entries(tmp_path: Path) -> None:
+    class LogicalRemote(MemoryRemote):
+        def list_tree(self) -> list[RemoteEntry]:
+            entries = super().list_tree()
+            for entry in entries:
+                if entry.path == "enc.bin":
+                    entry.logical_size = 5
+            return entries
+
+    remote = LogicalRemote()
+    remote.files["enc.bin"] = b"x" * 42
+    remote.mtimes["enc.bin"] = time.time()
+    engine, _ = make_engine(tmp_path, remote)
+    local_file = engine.local_root / "enc.bin"
+    local_file.write_bytes(b"hello")
+
+    result = engine.sync()
+
+    assert result.conflicts == 0
+    assert result.uploaded == 0
+    assert result.downloaded == 0
+
+
 def test_empty_folders_are_skipped_when_unsupported(tmp_path: Path) -> None:
     class NoEmptyFolders(MemoryRemote):
         supports_empty_folders = False

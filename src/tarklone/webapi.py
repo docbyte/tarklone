@@ -348,6 +348,36 @@ class TarkleWeb:
                 return presigned
         raise WebApiError("Tarkle lieferte keine Download-URL.")
 
+    def download_range(
+        self,
+        item: dict[str, Any],
+        workspace_id: str,
+        start: int,
+        length: int,
+    ) -> bytes:
+        """Liest einen Bytebereich einer Remote-Datei (für den Crypto-Header)."""
+        if start < 0 or length <= 0:
+            raise WebApiError("Ungültiger Download-Bereich.")
+        url = self.download_url(item, workspace_id)
+        end = start + length - 1
+        try:
+            response = httpx.get(
+                url,
+                headers={"Range": f"bytes={start}-{end}"},
+                timeout=30.0,
+                follow_redirects=True,
+            )
+        except httpx.HTTPError as exc:
+            raise WebApiError(f"Range-Download fehlgeschlagen: {exc}") from exc
+        if response.status_code == 206:
+            return response.content
+        if response.status_code == 200:
+            # Storage hat Range ignoriert; der Header ist trotzdem enthalten.
+            return response.content[start : end + 1]
+        raise WebApiError(
+            f"Range-Download fehlgeschlagen: HTTP {response.status_code}"
+        )
+
     def download_to(
         self,
         item: dict[str, Any],

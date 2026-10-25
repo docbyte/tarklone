@@ -16,6 +16,8 @@ DEFAULT_EXCLUDES = [
     "~$*",
     "*.tmp",
     "*.part",
+    "*.tarklone-part",
+    "*.tarklone-cipher",
     ".DS_Store",
     "Thumbs.db",
     "desktop.ini",

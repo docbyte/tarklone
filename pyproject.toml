@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "docbyte" }]
 dependencies = [
+    "cryptography>=43",
     "httpx>=0.28",
     "keyring>=25",
     "pystray>=0.19",
