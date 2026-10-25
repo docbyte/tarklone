@@ -16,7 +16,8 @@ Bidirektionaler Ordner-Sync zwischen Windows und [Tarkle](https://tarkle.com) �
 - Bidirektionaler Sync eines lokalen Ordners mit dem Workspace-Root oder einem Remote-Ordnerpfad
 - Dateien und Unterordner in beide Richtungen
 - Optionaler AES-256-GCM-Ordner `encrypted/`: lokal lesbar, in Tarkle verschlüsselt
-- Passwortgeschützter Master-Key; Passwortänderung ohne Neuverschlüsselung der Dateien
+- Datei- und Ordnernamen unter `encrypted/` werden zusätzlich mit AES-SIV verschlüsselt
+- Passwortgeschützter Master-Key; Passwortänderung ohne Neuverschlüsselung der Dateien oder Namen
 - Konfliktkopien statt Überschreiben (`Name (Konflikt PC Zeitstempel).ext`)
 - Löschungen standardmäßig **nicht** übertragen; lokale Löschungen landen in `.tarklone/trash`
 - Tray-App mit Status, manuellem Sync, Pause und Einstellungen
@@ -101,15 +102,18 @@ In den Einstellungen kann ein Passwort für den Unterordner `encrypted/` gesetzt
 werden. Der Ordner wird beim Setzen des Passworts angelegt.
 
 - Lokal liegen die Dateien im Klartext und bleiben normal nutzbar.
-- Beim Upload werden sie mit **AES-256-GCM** verschlüsselt; in Tarkle liegt nur
-  Ciphertext.
-- Beim Download werden sie wieder entschlüsselt.
-- Das Passwort verpackt einen zufälligen 32-Byte-Master-Key. Die Dateien selbst
+- Beim Upload werden die Inhalte mit **AES-256-GCM** verschlüsselt; in Tarkle
+  liegt nur Ciphertext.
+- Datei- und Ordnernamen unter `encrypted/` werden mit **AES-SIV** verschlüsselt.
+  Tarkle sieht nur Token-Namen; der lokale Klartextname bleibt erhalten.
+- Beim Download werden Inhalt und Namen wieder entschlüsselt.
+- Das Passwort verpackt einen zufälligen 32-Byte-Master-Key. Dateien und Namen
   werden mit diesem Master-Key verschlüsselt; bei einer Passwortänderung wird
-  nur der Master-Key neu verpackt. **Dateien werden nicht neu verschlüsselt.**
+  nur der Master-Key neu verpackt. **Dateien und Namen werden nicht neu
+  verschlüsselt.**
 - Die Schlüsseldatei `encrypted/.tarklone-key.json` enthält nur den mit dem
-  Passwort verpackten Master-Key und wird mitgesynct. Sie ist nicht geheim,
-  aber ohne Passwort nicht entschlüsselbar.
+  Passwort verpackten Master-Key und wird mitgesynct. Der Dateiname der
+  Schlüsseldatei bleibt sichtbar; er enthält keine Nutzdatennamen.
 - Der Ordner muss beim erstmaligen Setzen des Passworts leer sein. Dateien, die
   vorher unverschlüsselt in Tarkle unter `encrypted/` liegen, müssen entfernt
   werden.
@@ -117,9 +121,14 @@ werden. Der Ordner wird beim Setzen des Passworts angelegt.
   Wiederherstellung ohne Passwort oder Schlüsseldatei.
 - Auf einem neuen Rechner wird die Schlüsseldatei beim ersten Sync
   heruntergeladen. Danach in den Einstellungen das Passwort eingeben
-  (**Entsperren**); der nächste Sync entschlüsselt die Dateien.
+  (**Entsperren**); der nächste Sync entschlüsselt Dateien und Namen.
 - Dateien nicht direkt über die Tarkle-Weboberfläche in `encrypted/` hochladen;
   sie würden als Klartext an der Verschlüsselung vorbeigehen.
+- Bereits vorhandene Klartextnamen unter `encrypted/` werden beim ersten Sync
+  automatisch auf Token-Namen migriert. Der Ciphertext wird dabei unverändert
+  kopiert, nicht neu verschlüsselt.
+- Sehr lange Datei-/Ordnernamen können das Token-Limit überschreiten; dann
+  meldet der Sync einen Fehler und der Name muss gekürzt werden.
 
 ### Free- und Pro-Plan
 

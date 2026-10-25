@@ -110,6 +110,44 @@ def test_enabling_requires_empty_encrypted_folder(tmp_path: Path) -> None:
     manager.set_password("password123")
 
 
+def test_name_encryption_roundtrip(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    manager.set_password("password123")
+    path = "encrypted/Urlaub/Foto 1.jpg"
+    encrypted = manager.encrypt_path(path)
+    assert encrypted.startswith("encrypted/")
+    assert "Urlaub" not in encrypted
+    assert "Foto" not in encrypted
+    assert manager.decrypt_path(encrypted) == path
+    assert manager.encrypt_path(path) == encrypted
+    other = manager.encrypt_path("encrypted/Andere/Foto 1.jpg")
+    assert other != encrypted
+
+
+def test_name_tokens_survive_password_change(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    manager.set_password("password123")
+    path = "encrypted/Ordner/Datei.txt"
+    before = manager.encrypt_path(path)
+    manager.change_password("password123", "newpassword456")
+    assert manager.encrypt_path(path) == before
+    assert manager.decrypt_path(before) == path
+
+
+def test_too_long_name_is_rejected(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    manager.set_password("password123")
+    with pytest.raises(CryptoError):
+        manager.encrypt_path("encrypted/" + "x" * 200)
+
+
+def test_keyfile_contains_name_encryption_marker(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    manager.set_password("password123")
+    data = json.loads(manager.keyfile.read_text(encoding="utf-8"))
+    assert data["name_encryption"] == 1
+
+
 def test_path_classification(tmp_path: Path) -> None:
     manager = make_manager(tmp_path)
     assert manager.is_encrypted_path("encrypted/foo.txt")

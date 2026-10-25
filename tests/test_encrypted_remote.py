@@ -44,7 +44,7 @@ class FakeRemote:
 
     def download(self, entry: RemoteEntry, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(self.files[entry.path])
+        destination.write_bytes(self.files[entry.remote_path or entry.path])
 
     def upload(
         self,
@@ -65,7 +65,7 @@ class FakeRemote:
         )
 
     def download_range(self, entry: RemoteEntry, start: int, length: int) -> bytes:
-        return self.files[entry.path][start : start + length]
+        return self.files[entry.remote_path or entry.path][start : start + length]
 
     def delete(self, entry: RemoteEntry) -> None:
         self.files.pop(entry.path, None)
@@ -82,6 +82,7 @@ def test_encrypted_sync_roundtrip_and_password_change(tmp_path: Path) -> None:
     (local / "encrypted" / "test.txt").write_text("secret data", encoding="utf-8")
     (local / "normal.txt").write_text("normal data", encoding="utf-8")
 
+    token_path = manager.encrypt_path("encrypted/test.txt")
     remote = FakeRemote()
     adapter = EncryptionAdapter(remote, manager)
     state = SyncState(tmp_path / "state.sqlite3")
@@ -91,21 +92,24 @@ def test_encrypted_sync_roundtrip_and_password_change(tmp_path: Path) -> None:
         assert first.errors == []
         assert "normal.txt" in remote.files
         assert remote.files["normal.txt"] == b"normal data"
-        assert remote.files["encrypted/test.txt"][:5] == MAGIC
-        assert b"secret data" not in remote.files["encrypted/test.txt"]
+        assert token_path in remote.files
+        assert "encrypted/test.txt" not in remote.files
+        assert remote.files[token_path][:5] == MAGIC
+        assert b"secret data" not in remote.files[token_path]
         assert "encrypted/.tarklone-key.json" in remote.files
 
         second = engine.sync()
         assert second.changed == 0
         assert second.errors == []
 
-        before = hashlib.sha256(remote.files["encrypted/test.txt"]).hexdigest()
+        before = hashlib.sha256(remote.files[token_path]).hexdigest()
         manager.change_password("password123", "newpassword456")
         third = engine.sync()
-        after = hashlib.sha256(remote.files["encrypted/test.txt"]).hexdigest()
+        after = hashlib.sha256(remote.files[token_path]).hexdigest()
         assert third.errors == []
         assert third.uploaded == 1  # nur die Schlüsseldatei
         assert before == after
+        assert manager.encrypt_path("encrypted/test.txt") == token_path
 
         encrypted_entry = [
             entry for entry in adapter.list_tree() if entry.path == "encrypted/test.txt"
@@ -116,6 +120,37 @@ def test_encrypted_sync_roundtrip_and_password_change(tmp_path: Path) -> None:
         assert encrypted_entry.logical_size == len("secret data")
     finally:
         state.close()
+        adapter.close()
+
+
+def test_legacy_plaintext_names_are_migrated(tmp_path: Path) -> None:
+    local = tmp_path / "local"
+    local.mkdir()
+    manager = EncryptionManager(local, iterations=10_000, cache_in_keyring=False)
+    manager.set_password("password123")
+
+    source = tmp_path / "source.txt"
+    source.write_text("legacy content", encoding="utf-8")
+    cipher = tmp_path / "legacy-cipher.bin"
+    manager.encrypt_file(source, cipher)
+
+    remote = FakeRemote()
+    remote.files["encrypted/legacy.txt"] = cipher.read_bytes()
+    remote.files["encrypted/.tarklone-key.json"] = manager.keyfile.read_bytes()
+    adapter = EncryptionAdapter(remote, manager)
+    try:
+        entries = adapter.list_tree()
+        paths = {entry.path for entry in entries}
+        assert "encrypted/legacy.txt" in paths
+        token_path = manager.encrypt_path("encrypted/legacy.txt")
+        assert token_path in remote.files
+        assert "encrypted/legacy.txt" not in remote.files
+        assert remote.files[token_path][:5] == MAGIC
+        legacy_entry = [entry for entry in entries if entry.path == "encrypted/legacy.txt"][0]
+        target = tmp_path / "legacy-decrypted.txt"
+        adapter.download(legacy_entry, target)
+        assert target.read_text(encoding="utf-8") == "legacy content"
+    finally:
         adapter.close()
 
 

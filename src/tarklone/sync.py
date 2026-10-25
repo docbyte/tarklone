@@ -37,6 +37,9 @@ class RemoteEntry:
     entry_id: str = ""
     content_hash: str = ""
     parent_id: str = ""
+    # Tatsächlicher Remote-Pfad, falls er vom logischen Pfad abweicht
+    # (verschlüsselte Namen unter encrypted/). Leer = identisch mit path.
+    remote_path: str = ""
     # Für transparent verschlüsselte Dateien: Größe des Klartexts. ``size``
     # bleibt die Größe des tatsächlich übertragenen Blobs (Ciphertext).
     # None bedeutet: keine abweichende logische Größe vorhanden.

@@ -129,9 +129,10 @@ class TarkleRemote:
         item = self._items.get(entry.entry_id)
         if item:
             return item
+        lookup_path = entry.remote_path or entry.path
         for candidate in self.web.search_files(
             self.settings.workspace_id,
-            query=PurePosixPath(entry.path).name,
+            query=PurePosixPath(lookup_path).name,
         ):
             if str(candidate.get("id")) == entry.entry_id or str(
                 candidate.get("file_id")
