@@ -128,5 +128,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ls -lh release-assets
-          gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          OUT="release-upload"
+          mkdir -p "$OUT"
+          cp release-assets/tarklone-single.exe "$OUT/tarklone-${VERSION}-windows-x64.exe"
+          cp release-assets/tarklone-ubuntu "$OUT/tarklone-${VERSION}-ubuntu-x86_64"
+          cp release-assets/tarklone-macos.zip "$OUT/tarklone-${VERSION}-macos-arm64.zip"
+          cp release-assets/linux/tarklone-cli "$OUT/tarklone-cli-${VERSION}-linux-x86_64"
+          cp release-assets/darwin/tarklone-cli "$OUT/tarklone-cli-${VERSION}-macos-arm64"
+          cp release-assets/windows/tarklone-cli.exe "$OUT/tarklone-cli-${VERSION}-windows-x64.exe"
+          (
+            cd "$OUT"
+            sha256sum * > "SHA256SUMS-${VERSION}.txt"
+          )
+          ls -lh "$OUT"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "tarklone $VERSION" \
+              --generate-notes
+          fi
+          gh release upload "$TAG" "$OUT"/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
