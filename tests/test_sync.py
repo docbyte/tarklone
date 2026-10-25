@@ -108,6 +108,24 @@ def test_normalize_rel_rejects_traversal() -> None:
         normalize_rel("../evil.txt")
 
 
+def test_sync_reports_progress(tmp_path: Path) -> None:
+    remote = MemoryRemote()
+    events = []
+    engine, state = make_engine(tmp_path, remote, on_progress=events.append)
+    try:
+        (engine.local_root / "hello.txt").write_text("hello", encoding="utf-8")
+        result = engine.sync()
+    finally:
+        state.close()
+
+    assert result.errors == []
+    assert events
+    assert events[0].current == 0
+    assert events[-1].current == events[-1].total
+    assert events[-1].percent == 100
+    assert events[-1].eta_seconds == 0
+
+
 def test_initial_upload(tmp_path: Path) -> None:
     remote = MemoryRemote()
     engine, state = make_engine(tmp_path, remote)

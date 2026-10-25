@@ -89,6 +89,15 @@ class Action:
 
 
 @dataclass
+class SyncProgress:
+    current: int
+    total: int
+    percent: int
+    eta_seconds: float
+    message: str = ""
+
+
+@dataclass
 class SyncResult:
     started_at: float = field(default_factory=time.time)
     finished_at: float = 0.0
@@ -231,6 +240,7 @@ class SyncEngine:
         exclude: Iterable[str] = (),
         logger: logging.Logger | None = None,
         progress: Callable[[str], None] | None = None,
+        on_progress: Callable[[SyncProgress], None] | None = None,
         cancel_event: threading.Event | None = None,
     ):
         self.local_root = Path(local_root).resolve()
@@ -244,6 +254,7 @@ class SyncEngine:
         self.scanner = LocalScanner(self.local_root, exclude)
         self.logger = logger or logging.getLogger("tarklone.sync")
         self.progress = progress
+        self.on_progress = on_progress
         self.cancel_event = cancel_event or threading.Event()
         self._run_lock = threading.Lock()
         self._trash_root = self.local_root / ".tarklone" / "trash"
@@ -259,6 +270,35 @@ class SyncEngine:
     def _check_cancel(self) -> None:
         if self.cancel_event.is_set():
             raise SyncError("Sync abgebrochen.")
+
+    def _emit_progress(
+        self,
+        current: int,
+        total: int,
+        started_at: float,
+        message: str = "",
+    ) -> None:
+        if self.on_progress is None:
+            return
+        if total <= 0:
+            percent = 100
+            eta = 0.0
+        else:
+            percent = max(0, min(100, int(current * 100 / total)))
+            elapsed = max(0.0, time.time() - started_at)
+            eta = (elapsed / current) * (total - current) if current > 0 else 0.0
+        try:
+            self.on_progress(
+                SyncProgress(
+                    current=current,
+                    total=total,
+                    percent=percent,
+                    eta_seconds=eta,
+                    message=message,
+                )
+            )
+        except Exception:
+            pass
 
     def _safe_destination(self, rel_path: str) -> Path:
         rel = normalize_rel(rel_path)
@@ -638,6 +678,12 @@ class SyncEngine:
             actions = self._plan(local_map, remote_map, state_map, full)
             result.actions = actions
             self._emit(f"{len(actions)} Aktion(en) geplant.")
+            total = sum(
+                1 for action in actions if action.kind not in {"skip", "record"}
+            )
+            completed = 0
+            started = time.time()
+            self._emit_progress(0, total, started, "Start")
 
             for action in actions:
                 self._check_cancel()
@@ -650,7 +696,11 @@ class SyncEngine:
                 except Exception as exc:  # noqa: BLE001 - pro Datei weiterarbeiten
                     self.logger.exception("Sync-Aktion fehlgeschlagen: %s", action.path)
                     result.errors.append(f"{action.path}: {exc}")
+                if action.kind not in {"skip", "record"}:
+                    completed += 1
+                    self._emit_progress(completed, total, started, action.path)
 
+            self._emit_progress(total, total, started, "Fertig")
             result.finished_at = time.time()
             if not dry_run:
                 self.state.set_meta("last_sync", datetime.now().isoformat(timespec="seconds"))

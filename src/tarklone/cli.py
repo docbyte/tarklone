@@ -2,17 +2,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from . import __version__
 from .auth import AuthError, NotLoggedIn, OAuthClient, TokenStore
 from .config import (
+    SyncProfile,
     config_path,
+    crypto_keyring_username,
+    data_dir,
     ensure_dirs,
     load_settings,
     log_path,
+    profile_state_path,
     save_settings,
     state_path,
 )
@@ -120,13 +126,23 @@ def cmd_status(_args: argparse.Namespace) -> int:
     token = TokenStore().load()
 
     print(f"tarklone {__version__}")
-    print(f"Konfiguration:  {settings.local_folder or '—'}")
-    if settings.workspace_name or settings.workspace_id:
-        print(f"Workspace:      {settings.workspace_name or settings.workspace_id}")
-    if settings.remote_folder_name or settings.remote_folder_id:
-        print(f"Remote-Ordner:  {settings.remote_folder_name or settings.remote_folder_id}")
     _print_token_status(token)
     print(f"Status:         {'bereit' if settings.is_configured and token else 'Einrichtung nötig'}")
+    if settings.profiles:
+        print("\nWorkspace-Profile:")
+        for profile in settings.profiles:
+            state = "aktiv" if profile.enabled else "deaktiviert"
+            used = "Ja" if profile.sync_deletions else "Nein"
+            print(f"- {profile.display_name} ({profile.workspace_id}) [{state}]")
+            print(f"  Ordner:      {profile.local_folder or '—'}")
+            print(
+                f"  Remote:      {profile.remote_folder_id or 'Workspace-Root'}"
+            )
+            print(
+                f"  Intervall:   {profile.sync_interval_seconds}s, Löschungen: {used}"
+            )
+    else:
+        print("\nWorkspace-Profile: keine")
 
     errors = settings.validation_errors()
     if errors:
@@ -135,26 +151,69 @@ def cmd_status(_args: argparse.Namespace) -> int:
             print(f"- {error}")
     print(f"\nKonfigdatei:    {config_path()}")
     print(f"Logdatei:       {log_path()}")
-    print(f"Zustand:        {state_path()}")
+    print(f"Zustand:        {data_dir() / 'profiles'}")
     return 0
 
 
 def cmd_init(_args: argparse.Namespace) -> int:
     settings = load_settings()
+    first = settings.profiles[0] if settings.profiles else None
     print("Einrichtung von tarklone")
     print("========================")
-    local = input(f"Lokaler Ordner [{settings.local_folder or Path.cwd()}]: ").strip()
+    default_local = first.local_folder if first else settings.local_folder
+    local = input(f"Lokaler Ordner [{default_local or Path.cwd()}]: ").strip()
     if local:
-        settings.local_folder = str(Path(local).expanduser())
-    workspace = input(f"Tarkle-Workspace-ID [{settings.workspace_id}]: ").strip()
-    if workspace:
-        settings.workspace_id = workspace
-    folder = input(f"Remote-Ordner-ID (leer = Workspace-Root) [{settings.remote_folder_id}]: ").strip()
-    if folder:
-        settings.remote_folder_id = folder
+        local_folder = str(Path(local).expanduser())
+    else:
+        local_folder = default_local or str(Path.cwd())
+    workspace = input(
+        f"Tarkle-Workspace-ID [{first.workspace_id if first else settings.workspace_id}]: "
+    ).strip()
+    if not workspace:
+        workspace = first.workspace_id if first else settings.workspace_id
+    folder = input(
+        f"Remote-Ordner (Pfad, leer = Workspace-Root) "
+        f"[{first.remote_folder_id if first else settings.remote_folder_id}]: "
+    ).strip()
+    if not folder:
+        folder = first.remote_folder_id if first else settings.remote_folder_id
+    interval_raw = input(
+        f"Sync-Intervall in Sekunden [{first.sync_interval_seconds if first else 60}]: "
+    ).strip()
+    try:
+        interval = max(15, int(interval_raw or (first.sync_interval_seconds if first else 60)))
+    except ValueError:
+        interval = 60
+    if not workspace:
+        print("Fehler: Eine Tarkle-Workspace-ID ist erforderlich.", file=sys.stderr)
+        return 2
+    profile = next(
+        (item for item in settings.profiles if item.workspace_id == workspace),
+        None,
+    )
+    if profile is None:
+        profile = SyncProfile(id=workspace, workspace_id=workspace)
+        settings.profiles.append(profile)
+    profile.local_folder = local_folder
+    profile.remote_folder_id = folder.strip().replace("\\", "/").strip("/")
+    profile.sync_interval_seconds = interval
+    settings.sync_legacy_fields()
     save_settings(settings)
-    print("Gespeichert. Anschließend `tarklone login` und `tarklone probe` ausführen.")
+    print("Gespeichert. Anschließend `tarklone login` und `tarklone sync` ausführen.")
     return 0
+
+
+def _validate_profile(profile: SyncProfile) -> list[str]:
+    errors: list[str] = []
+    if not profile.local_folder:
+        errors.append("Kein lokaler Ordner ausgewählt.")
+    elif not Path(profile.local_folder).is_dir():
+        errors.append(f"Lokaler Ordner existiert nicht: {profile.local_folder}")
+    if not profile.workspace_id:
+        errors.append("Keine Tarkle-Workspace-ID gesetzt.")
+    if profile.sync_interval_seconds < 15:
+        errors.append("Das Sync-Intervall muss mindestens 15 Sekunden betragen.")
+    return errors
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
@@ -168,84 +227,167 @@ def cmd_sync(args: argparse.Namespace) -> int:
     from .webapi import WebApiError
 
     settings = load_settings()
-    if args.local:
-        settings.local_folder = str(Path(args.local).expanduser())
-    if args.workspace:
-        settings.workspace_id = args.workspace
-    if args.folder is not None:
-        settings.remote_folder_id = args.folder.strip().replace("\\", "/").strip("/")
+    local_override = str(Path(args.local).expanduser()) if args.local else ""
+    folder_override = (
+        args.folder.strip().replace("\\", "/").strip("/")
+        if args.folder is not None
+        else None
+    )
 
-    errors = settings.validation_errors()
-    if errors:
-        print("Einrichtung unvollständig:", file=sys.stderr)
-        for error in errors:
-            print(f"- {error}", file=sys.stderr)
+    profiles = list(settings.enabled_profiles)
+    if args.workspace:
+        selected = next(
+            (
+                profile
+                for profile in settings.profiles
+                if profile.workspace_id == args.workspace or profile.id == args.workspace
+            ),
+            None,
+        )
+        if selected is None:
+            selected = SyncProfile(
+                id=args.workspace,
+                workspace_id=args.workspace,
+                local_folder=local_override,
+                sync_interval_seconds=settings.sync_interval_seconds,
+                sync_deletions=settings.sync_deletions,
+            )
+        profiles = [selected]
+    elif local_override and len(profiles) > 1:
+        print(
+            "Fehler: --local kann bei mehreren Profilen nur zusammen mit "
+            "--workspace verwendet werden.",
+            file=sys.stderr,
+        )
+        return 2
+    if not profiles:
+        print("Kein Workspace-Profil eingerichtet.", file=sys.stderr)
         print("Bitte `tarklone init` oder die Tray-App verwenden.", file=sys.stderr)
         return 2
 
+    prepared = []
+    for profile in profiles:
+        current = replace(
+            profile,
+            local_folder=local_override or profile.local_folder,
+            remote_folder_id=(
+                folder_override
+                if folder_override is not None
+                else profile.remote_folder_id
+            ),
+        )
+        errors = _validate_profile(current)
+        if errors:
+            print(
+                f"Profil „{current.display_name}“ ist unvollständig:",
+                file=sys.stderr,
+            )
+            for error in errors:
+                print(f"- {error}", file=sys.stderr)
+            return 2
+        prepared.append(current)
+
     oauth = OAuthClient(settings)
-    remote = None
-    state = None
+    token = None
+    overall_errors = 0
     try:
         token = oauth.ensure_valid()
-        encryption = EncryptionManager(Path(settings.local_folder))
-        encryption.load_cached_key()
-        if encryption.enabled and not encryption.unlocked:
-            password = getpass.getpass("Passwort für den encrypted-Ordner: ")
+        for profile in prepared:
+            print(f"Sync „{profile.display_name}“ …")
+            profile_settings = replace(
+                settings,
+                local_folder=profile.local_folder,
+                workspace_id=profile.workspace_id,
+                workspace_name=profile.workspace_name,
+                remote_folder_id=profile.remote_folder_id,
+                sync_deletions=profile.sync_deletions,
+                sync_interval_seconds=profile.sync_interval_seconds,
+            )
+            remote = None
+            state = None
             try:
-                encryption.unlock(password)
-            except CryptoError as exc:
-                print(f"Fehler: {exc}", file=sys.stderr)
-                return 2
-        if not encryption.enabled:
-            encrypted_dir = Path(settings.local_folder) / "encrypted"
-            if encrypted_dir.is_dir() and any(
-                path.is_file() and path.name != ".tarklone-key.json"
-                for path in encrypted_dir.rglob("*")
-            ):
-                print(
-                    "Fehler: Der Ordner encrypted enthält Dateien, aber es ist kein "
-                    "Passwort gesetzt. Bitte zuerst in der Tray-App ein Passwort festlegen.",
-                    file=sys.stderr,
+                encryption = EncryptionManager(
+                    Path(profile.local_folder),
+                    keyring_username=crypto_keyring_username(profile.id, profile.local_folder),
                 )
-                return 2
-        remote = TarkleRemote(settings, token)
-        adapter = EncryptionAdapter(remote, encryption)
-        state = SyncState(state_path())
-        engine = SyncEngine(
-            Path(settings.local_folder),
-            adapter,
-            state,
-            sync_deletions=settings.sync_deletions,
-            conflict_policy=settings.conflict_policy,
-            exclude=settings.exclude,
-            progress=(print if args.verbose or args.dry_run else None),
-        )
-        result = engine.sync(dry_run=args.dry_run, full=args.full)
+                encryption.load_cached_key()
+                if encryption.enabled and not encryption.unlocked:
+                    password = getpass.getpass(
+                        f"Passwort für encrypted ({profile.display_name}): "
+                    )
+                    encryption.unlock(password)
+                if not encryption.enabled:
+                    encrypted_dir = Path(profile.local_folder) / "encrypted"
+                    if encrypted_dir.is_dir() and any(
+                        path.is_file() and path.name != ".tarklone-key.json"
+                        for path in encrypted_dir.rglob("*")
+                    ):
+                        print(
+                            "Fehler: Der Ordner encrypted enthält Dateien, aber es "
+                            "ist kein Passwort gesetzt. Bitte zuerst in der Tray-App "
+                            "ein Passwort festlegen.",
+                            file=sys.stderr,
+                        )
+                        return 2
+                remote = TarkleRemote(profile_settings, token)
+                adapter = EncryptionAdapter(remote, encryption)
+                state_file = profile_state_path(profile.id)
+                existing_states = (
+                    list(state_file.parent.glob("*.sqlite3"))
+                    if state_file.parent.exists()
+                    else []
+                )
+                if (
+                    not state_file.exists()
+                    and not existing_states
+                    and settings.profiles
+                    and profile.id == settings.profiles[0].id
+                    and state_path().exists()
+                ):
+                    state_file.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(state_path(), state_file)
+                state = SyncState(state_file)
+                engine = SyncEngine(
+                    Path(profile.local_folder),
+                    adapter,
+                    state,
+                    sync_deletions=profile.sync_deletions,
+                    conflict_policy=settings.conflict_policy,
+                    exclude=settings.exclude,
+                    progress=(print if args.verbose or args.dry_run else None),
+                )
+                result = engine.sync(dry_run=args.dry_run, full=args.full)
+                mode = " (dry-run)" if result.dry_run else ""
+                print(f"  Sync{mode} abgeschlossen in {result.duration:.1f}s")
+                print(f"  hochgeladen:     {result.uploaded}")
+                print(f"  heruntergeladen: {result.downloaded}")
+                print(f"  lokal gelöscht:  {result.deleted_local}")
+                print(f"  remote gelöscht: {result.deleted_remote}")
+                print(f"  Konflikte:       {result.conflicts}")
+                print(f"  übersprungen:    {result.skipped}")
+                if result.errors:
+                    overall_errors += len(result.errors)
+                    print(
+                        f"  Fehler:          {len(result.errors)}",
+                        file=sys.stderr,
+                    )
+                    for error in result.errors:
+                        print(f"    - {error}", file=sys.stderr)
+            finally:
+                if remote is not None:
+                    remote.close()
+                if state is not None:
+                    state.close()
+    except CryptoError as exc:
+        print(f"Fehler: {exc}", file=sys.stderr)
+        return 2
     except (AuthError, SyncError, WebApiError) as exc:
         print(f"Fehler: {exc}", file=sys.stderr)
         return 2
     finally:
-        if remote is not None:
-            remote.close()
-        if state is not None:
-            state.close()
         oauth.close()
 
-    mode = " (dry-run)" if result.dry_run else ""
-    print(f"Sync{mode} abgeschlossen in {result.duration:.1f}s")
-    print(f"  hochgeladen:   {result.uploaded}")
-    print(f"  heruntergeladen: {result.downloaded}")
-    print(f"  lokal gelöscht: {result.deleted_local}")
-    print(f"  remote gelöscht: {result.deleted_remote}")
-    print(f"  Konflikte:     {result.conflicts}")
-    print(f"  übersprungen:  {result.skipped}")
-    if result.errors:
-        print(f"  Fehler:        {len(result.errors)}", file=sys.stderr)
-        for error in result.errors:
-            print(f"    - {error}", file=sys.stderr)
-        return 1
-    return 0
+    return 1 if overall_errors else 0
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -1,4 +1,4 @@
-# tarklone 1.1.1
+# tarklone 1.2
 
 Bidirektionaler Ordner-Sync zwischen Windows und [Tarkle](https://tarkle.com) – als Tray-App.
 
@@ -13,15 +13,19 @@ Bidirektionaler Ordner-Sync zwischen Windows und [Tarkle](https://tarkle.com) �
 - Browser-Login bei Tarkle, ohne Passwort im Programm zu speichern
 - Zugriffstoken im Windows Credential Manager
 - Workspace-Auswahl direkt im Einrichtungsfenster
+- **Mehrere Workspace-Profile** mit jeweils eigenem lokalen Ordner, Sync-Intervall,
+  Löschverhalten und eigener Verschlüsselung
 - Bidirektionaler Sync eines lokalen Ordners mit dem Workspace-Root oder einem Remote-Ordnerpfad
 - Dateien und Unterordner in beide Richtungen
+- **Speicherplatzanzeige** pro Workspace als Wert und horizontaler Balken
 - Optionaler AES-256-GCM-Ordner `encrypted/`: lokal lesbar, in Tarkle verschlüsselt
 - Datei- und Ordnernamen unter `encrypted/` werden zusätzlich mit AES-SIV verschlüsselt
 - Passwortgeschützter Master-Key; Passwortänderung ohne Neuverschlüsselung der Dateien oder Namen
 - Konfliktkopien statt Überschreiben (`Name (Konflikt PC Zeitstempel).ext`)
 - Löschungen standardmäßig **nicht** übertragen; lokale Löschungen landen in `.tarklone/trash`
-- Tray-App mit Status, manuellem Sync, Pause und Einstellungen
-- Hintergrund-Sync per Zeitintervall und Dateiüberwachung (`watchdog`)
+- Tray-App mit Status, Fortschritt in Prozent und geschätzter Restzeit, manuellem Sync, Pause
+  und Einstellungen
+- Hintergrund-Sync je Profil per eigenem Zeitintervall und Dateiüberwachung (`watchdog`)
 - Update-Prüfung mit automatischem Download der passenden Plattform-Datei
 - Danger Zone zum Zurücksetzen des Verschlüsselungsschlüssels
 - Schutz vor Pfad-Traversal und versehentlichem Löschen
@@ -53,25 +57,35 @@ python -m venv .venv
 
    Beim ersten Start öffnet sich das Einrichtungsfenster:
 
-   - lokalen Ordner auswählen
    - Tarkle-Workspace aus der Liste wählen (nach dem Login automatisch geladen)
+   - lokalen Ordner auswählen
    - optional einen Remote-Ordnerpfad eintragen, z. B. `Kunden/Projekt`
      (leer = Workspace-Root)
    - Sync-Intervall und Löschverhalten festlegen
+   - **Profil übernehmen** klicken
 
-   Danach läuft tarklone im Infobereich. Ein Doppelklick auf das Symbol startet einen Sync;
-   das Kontextmenü bietet Einstellungen, Pause, Ordner öffnen und Protokoll öffnen.
+   Für weitere Workspaces den nächsten Workspace wählen, einen eigenen lokalen
+   Ordner zuweisen und wieder **Profil übernehmen** klicken. Jedes Profil wird
+   anschließend mit seinem eigenen Intervall synchronisiert. Verschlüsselung und
+   Speicheranzeige beziehen sich jeweils auf das ausgewählte Profil.
+
+   Danach läuft tarklone im Infobereich. Ein Doppelklick auf das Symbol startet
+   einen Sync aller Profile; das Kontextmenü bietet Einstellungen, Pause,
+   Fortschritt, Restzeit, Ordner öffnen und Protokoll öffnen.
 
 ## Kommandozeile
 
 ```powershell
-# Einmaliger Sync
+# Einmaliger Sync aller eingerichteten Profile
 .\.venv\Scripts\tarklone.exe sync --verbose
 
 # Nur anzeigen, was passieren würde
 .\.venv\Scripts\tarklone.exe sync --dry-run --verbose
 
-# Alternativer Workspace / Remote-Ordner
+# Bestimmtes Profil synchronisieren
+.\.venv\Scripts\tarklone.exe sync --workspace <ID>
+
+# Remote-Ordner für ein Profil überschreiben
 .\.venv\Scripts\tarklone.exe sync --workspace <ID> --folder "Kunden/Projekt"
 ```
 
@@ -80,11 +94,26 @@ python -m venv .venv
 | Datei | Pfad |
 |---|---|
 | Einstellungen | `%LOCALAPPDATA%\docbyte\tarklone\config.json` |
-| Zustand/Sync-Datenbank | `%LOCALAPPDATA%\docbyte\tarklone\state.sqlite3` |
+| Zustand/Sync-Datenbank | `%LOCALAPPDATA%\docbyte\tarklone\profiles\<workspace-id>.sqlite3` |
 | Protokoll | `%LOCALAPPDATA%\docbyte\tarklone\Logs\tarklone.log` |
 | Zugriffstoken | Windows Credential Manager, Dienst `tarklone` |
 | Token-Fallback (headless) | `<AppData>\tarklone\token.json`, Dateimodus 0600 |
 | Verschlüsselungs-Keyfile | `<Sync-Ordner>\encrypted\.tarklone-key.json` |
+
+Beim ersten Start wird die bisherige Einzelkonfiguration automatisch in ein
+Workspace-Profil überführt; der bisherige Sync-Zustand wird für dieses Profil
+übernommen.
+
+## Tray-Anzeige
+
+Während eines Syncs zeigt das Tray-Menü das aktive Profil, den Fortschritt in
+Prozent und eine geschätzte Restzeit. Stehen weitere Profile an, wird zusätzlich
+die Anzahl der ausstehenden Profile angezeigt. Der Fortschritt wird aus den
+geplanten Sync-Aktionen berechnet; bei sehr großen einzelnen Dateien springt er
+erst nach Abschluss der Datei weiter.
+
+Die Einstellungen zeigen für den ausgewählten Workspace den belegten Speicher
+als Wert und als horizontalen Balken.
 
 ## Sync-Verhalten
 

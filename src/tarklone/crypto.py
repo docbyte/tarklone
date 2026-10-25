@@ -81,12 +81,14 @@ class EncryptionManager:
         *,
         iterations: int = DEFAULT_ITERATIONS,
         cache_in_keyring: bool = True,
+        keyring_username: str = "crypto-master",
     ):
         self.local_root = Path(local_root).resolve()
         self.encrypted_dir = self.local_root / ENCRYPTED_DIR
         self.keyfile = self.encrypted_dir / KEYFILE_NAME
         self.iterations = iterations
         self.cache_in_keyring = cache_in_keyring
+        self.keyring_username = keyring_username
         self.master_key: bytes | None = None
         self._name_key_cache: bytes | None = None
 
@@ -160,7 +162,7 @@ class EncryptionManager:
         try:
             import keyring
 
-            raw = keyring.get_password("tarklone", "crypto-master")
+            raw = keyring.get_password("tarklone", self.keyring_username)
         except Exception:
             return False
         if not raw:
@@ -182,7 +184,7 @@ class EncryptionManager:
             try:
                 import keyring
 
-                keyring.delete_password("tarklone", "crypto-master")
+                keyring.delete_password("tarklone", self.keyring_username)
             except Exception:
                 pass
 
@@ -199,7 +201,7 @@ class EncryptionManager:
             try:
                 import keyring
 
-                keyring.delete_password("tarklone", "crypto-master")
+                keyring.delete_password("tarklone", self.keyring_username)
             except Exception:
                 pass
 
@@ -209,7 +211,7 @@ class EncryptionManager:
         try:
             import keyring
 
-            keyring.set_password("tarklone", "crypto-master", _b64(master))
+            keyring.set_password("tarklone", self.keyring_username, _b64(master))
         except Exception:
             # Der Schlüssel bleibt für die laufende Sitzung im Speicher.
             pass

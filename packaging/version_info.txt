@@ -16,12 +16,12 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'docbyte'),
           StringStruct('FileDescription', 'tarklone - Tarkle Ordner-Sync'),
-          StringStruct('FileVersion', '1.1.1.0'),
+          StringStruct('FileVersion', '1.2.0.0'),
           StringStruct('InternalName', 'tarklone'),
           StringStruct('LegalCopyright', 'Copyright (c) 2026 docbyte'),
           StringStruct('OriginalFilename', 'tarklone-single.exe'),
           StringStruct('ProductName', 'tarklone'),
-          StringStruct('ProductVersion', '1.1.1')
+          StringStruct('ProductVersion', '1.2')
         ]
       )
     ]),

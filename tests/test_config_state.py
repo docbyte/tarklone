@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tarklone.config import Settings, load_settings, save_settings
+from tarklone.config import (
+    Settings,
+    SyncProfile,
+    crypto_keyring_username,
+    load_settings,
+    profile_state_path,
+    save_settings,
+)
 from tarklone.state import EntryState, SyncState
 
 
@@ -22,6 +29,51 @@ def test_settings_roundtrip(tmp_path: Path) -> None:
     assert loaded.workspace_name == "Test"
     assert loaded.sync_deletions is True
     assert loaded.exclude == ["*.tmp"]
+    assert len(loaded.profiles) == 1
+    assert loaded.profiles[0].workspace_id == "ws-1"
+
+
+def test_multiple_profiles_roundtrip(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    settings = Settings(
+        profiles=[
+            SyncProfile(
+                id="ws-1",
+                workspace_id="ws-1",
+                workspace_name="Eins",
+                local_folder=str(tmp_path),
+                remote_folder_id="kunden",
+                sync_interval_seconds=30,
+                sync_deletions=True,
+            ),
+            SyncProfile(
+                id="ws-2",
+                workspace_id="ws-2",
+                workspace_name="Zwei",
+                local_folder=str(tmp_path),
+                sync_interval_seconds=120,
+            ),
+        ]
+    )
+    save_settings(settings, path)
+    loaded = load_settings(path)
+    assert [profile.workspace_id for profile in loaded.profiles] == ["ws-1", "ws-2"]
+    assert loaded.profiles[0].remote_folder_id == "kunden"
+    assert loaded.profiles[0].sync_interval_seconds == 30
+    assert loaded.profiles[0].sync_deletions is True
+    assert loaded.profiles[1].sync_interval_seconds == 120
+    assert loaded.enabled_profiles == loaded.profiles
+
+
+def test_profile_paths_are_stable_and_safe() -> None:
+    assert profile_state_path("ws-1").name == "ws-1.sqlite3"
+    assert "/" not in profile_state_path("../../evil").name
+    assert crypto_keyring_username("ws-1") == "crypto-master-ws-1"
+    first = crypto_keyring_username("ws-1", "C:/sync/a")
+    second = crypto_keyring_username("ws-1", "C:/sync/b")
+    assert first.startswith("crypto-master-ws-1-")
+    assert first != second
+    assert first == crypto_keyring_username("ws-1", "C:/sync/a")
 
 
 def test_settings_ignores_unknown_fields(tmp_path: Path) -> None:
@@ -31,12 +83,31 @@ def test_settings_ignores_unknown_fields(tmp_path: Path) -> None:
     assert loaded.workspace_id == "ws-1"
 
 
+def test_legacy_single_profile_is_migrated(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        '{"local_folder": "%s", "workspace_id": "ws-1", '
+        '"sync_interval_seconds": 30, "sync_deletions": true}'
+        % str(tmp_path).replace("\\", "\\\\"),
+        encoding="utf-8",
+    )
+    loaded = load_settings(path)
+    assert len(loaded.profiles) == 1
+    profile = loaded.profiles[0]
+    assert profile.workspace_id == "ws-1"
+    assert profile.local_folder == str(tmp_path)
+    assert profile.sync_interval_seconds == 30
+    assert profile.sync_deletions is True
+
+
 def test_settings_validation(tmp_path: Path) -> None:
     settings = Settings(local_folder=str(tmp_path), workspace_id="ws-1")
     assert settings.validation_errors() == []
-    settings.workspace_id = ""
+    settings.ensure_profiles()
+    settings.profiles[0].workspace_id = ""
     assert any("Workspace" in error for error in settings.validation_errors())
-    settings.local_folder = str(tmp_path / "missing")
+    settings.profiles[0].workspace_id = "ws-1"
+    settings.profiles[0].local_folder = str(tmp_path / "missing")
     assert any("existiert nicht" in error for error in settings.validation_errors())
 
 

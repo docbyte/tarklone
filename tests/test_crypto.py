@@ -131,6 +131,29 @@ def test_lock_clears_cached_master_but_keeps_keyfile(
     assert manager.keyfile.is_file()
 
 
+def test_custom_keyring_username_per_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import keyring
+
+    values: dict[tuple[str, str], str] = {}
+    monkeypatch.setattr(keyring, "set_password", lambda s, u, v: values.__setitem__((s, u), v))
+    monkeypatch.setattr(keyring, "get_password", lambda s, u: values.get((s, u)))
+    monkeypatch.setattr(keyring, "delete_password", lambda s, u: values.pop((s, u), None))
+
+    manager = EncryptionManager(
+        tmp_path,
+        iterations=10_000,
+        keyring_username="crypto-master-ws-1",
+    )
+    manager.set_password("password123")
+    assert values.get(("tarklone", "crypto-master-ws-1"))
+    assert not values.get(("tarklone", "crypto-master"))
+    manager.lock(clear_cache=True)
+    assert not values.get(("tarklone", "crypto-master-ws-1"))
+
+
 def test_reset_key_removes_keyfile_and_master(tmp_path: Path) -> None:
     manager = make_manager(tmp_path)
     manager.set_password("password123")

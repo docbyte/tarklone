@@ -114,6 +114,25 @@ def _parse_time(value: Any) -> float:
         return 0.0
 
 
+def _storage_usage_from_text(text: str) -> dict[str, int]:
+    def number(name: str) -> int:
+        match = re.search(rf'"{re.escape(name)}"\s*:\s*"?(\d+)"?', text)
+        return int(match.group(1)) if match else 0
+
+    used = number("workspaceUsedBytes") or number("generalWorkspaceUsedBytes")
+    limit = number("maxStorage")
+    left = number("storageLeft")
+    if not left and limit:
+        left = max(0, limit - used)
+    percent = round(used * 100 / limit) if limit else 0
+    return {
+        "used": used,
+        "limit": limit,
+        "left": left,
+        "percent": max(0, min(100, percent)),
+    }
+
+
 class TarkleWeb:
     """Zugriff auf die inoffizielle Tarkle-Web-API mit Supabase-Session-Cookie."""
 
@@ -277,6 +296,12 @@ class TarkleWeb:
         if self._default_slug:
             return self._default_slug
         raise WebApiError(f"Workspace {workspace_id} wurde nicht gefunden.")
+
+    def storage_usage(self, workspace_id: str) -> dict[str, int]:
+        """Liest belegten und verfügbaren Speicher aus der Tarkle-Web-App."""
+        key = self.workspace_key(workspace_id)
+        page = self._request("GET", f"/app/{key}/files")
+        return _storage_usage_from_text(_rsc_text(page.text))
 
     def _list_folder(self, key: str, folder_row_id: str | None) -> list[dict[str, Any]]:
         path = f"/app/{key}/files" if not folder_row_id else f"/app/{key}/folder/{folder_row_id}"

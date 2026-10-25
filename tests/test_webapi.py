@@ -8,6 +8,7 @@ from tarklone.webapi import (
     _item_type,
     _parse_time,
     _rsc_text,
+    _storage_usage_from_text,
     _workspace_array,
 )
 
@@ -59,6 +60,18 @@ def test_format_size() -> None:
     assert _format_size(0) == "0b"
     assert _format_size(1024) == "1.00kb"
     assert _format_size(24583) == "24.01kb"
+
+
+def test_parse_storage_usage() -> None:
+    text = (
+        '"storageLeft":4988831599,"generalWorkspaceUsedBytes":11168401,'
+        '"workspaceUsedBytes":11168401,"maxStorage":5000000000'
+    )
+    usage = _storage_usage_from_text(text)
+    assert usage["used"] == 11168401
+    assert usage["limit"] == 5000000000
+    assert usage["left"] == 4988831599
+    assert usage["percent"] == 0
 
 
 def test_item_type() -> None:
