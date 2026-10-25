@@ -279,7 +279,9 @@ class TarkloneApp:
 
     def _action_settings(self, icon=None, item=None) -> None:
         if self.root:
-            self._ui_queue.put(lambda: self.show_settings(first_run=False))
+            self._ui_queue.put(
+                lambda: self.show_settings(first_run=False, restore=True)
+            )
 
     def _action_open_log(self, icon=None, item=None) -> None:
         path = log_path()
@@ -300,13 +302,16 @@ class TarkloneApp:
             except Exception:
                 logger.debug("Windows-Benachrichtigung fehlgeschlagen", exc_info=True)
 
-    def show_settings(self, *, first_run: bool = False) -> None:
+    def show_settings(self, *, first_run: bool = False, restore: bool = False) -> None:
         if not self.root:
             return
         if self._settings_window and self._settings_window.winfo_exists():
-            self._settings_window.deiconify()
-            self._settings_window.lift()
-            self._settings_window.focus_force()
+            # Automatische Aufrufe (z. B. bei gesperrter Verschlüsselung)
+            # dürfen ein minimiertes Fenster nicht ständig wieder öffnen.
+            if restore:
+                self._settings_window.deiconify()
+                self._settings_window.lift()
+                self._settings_window.focus_force()
             return
         self._settings_window = SetupDialog(
             self.root,
