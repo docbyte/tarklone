@@ -118,8 +118,10 @@ def check_for_update(
     current_version: str | None = None,
     *,
     timeout: float = 20.0,
+    platform: str | None = None,
 ) -> UpdateInfo | None:
     current = current_version or __version__
+    platform = platform or sys.platform
     try:
         response = httpx.get(
             LATEST_URL,
@@ -154,10 +156,10 @@ def check_for_update(
     assets = data.get("assets")
     if not isinstance(assets, list):
         raise UpdateError("Release enthält keine Assets.")
-    asset = select_asset(assets)
+    asset = select_asset(assets, platform)
     if asset is None:
         raise UpdateError(
-            f"Für diese Plattform ({sys.platform}) gibt es kein passendes Update-Asset."
+            f"Für diese Plattform ({platform}) gibt es kein passendes Update-Asset."
         )
     checksum = select_checksum_asset(assets)
     if checksum is None:

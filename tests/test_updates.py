@@ -85,7 +85,7 @@ def test_check_for_update(monkeypatch: pytest.MonkeyPatch) -> None:
         "tarklone.updates.httpx.get",
         lambda *args, **kwargs: FakeResponse(200, payload),
     )
-    info = check_for_update("1.0")
+    info = check_for_update("1.0", platform="win32")
     assert info is not None
     assert info.version == "1.1"
     assert info.asset_name == "tarklone-1.1-windows-x64.exe"
@@ -131,7 +131,7 @@ def test_check_for_update_requires_checksum_asset(
         ),
     )
     with pytest.raises(UpdateError, match="Prüfsummendatei"):
-        check_for_update("1.0")
+        check_for_update("1.0", platform="win32")
 
 
 def test_update_download_fails_closed_on_bad_checksum(
