@@ -34,7 +34,7 @@ jobs:
       - name: Build CLI (Unix)
         if: runner.os != 'Windows'
         shell: bash
-        run: ${{ matrix.script }}
+        run: bash ${{ matrix.script }}
       - name: Build CLI (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
