@@ -4,6 +4,7 @@ import queue
 import sys
 import threading
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Callable
@@ -12,6 +13,7 @@ from . import __version__
 from .auth import OAuthClient, Token, TokenStore
 from .config import Settings, save_settings
 from .crypto import CryptoError, EncryptionManager
+from .updates import check_for_update, download_update
 
 PURPLE = "#714CB6"
 TEXT = "#17151F"
@@ -37,14 +39,18 @@ class SetupDialog(tk.Toplevel):
         *,
         first_run: bool = False,
         on_cancel: Callable[[], None] | None = None,
+        on_reset_encryption: Callable[[], tuple[bool, str]] | None = None,
     ):
         super().__init__(master)
         self.settings = settings
         self.on_saved = on_saved
         self.on_cancel = on_cancel
+        self.on_reset_encryption = on_reset_encryption
         self.first_run = first_run
         self._closed = False
         self._login_running = False
+        self._encryption_reset_allowed = False
+        self._update_running = False
 
         self.title("tarklone einrichten" if first_run else "tarklone Einstellungen")
         self.configure(bg=BACKGROUND)
@@ -68,6 +74,16 @@ class SetupDialog(tk.Toplevel):
         self.deletions_var = tk.BooleanVar(value=settings.sync_deletions)
         self.start_minimized_var = tk.BooleanVar(value=settings.start_minimized)
         self.launch_var = tk.BooleanVar(value=settings.launch_at_login)
+        self.update_days_var = tk.StringVar(
+            value=self._update_days_label(settings.update_check_interval_days)
+        )
+        self.update_status_var = tk.StringVar(
+            value=(
+                f"Zuletzt geprüft: {settings.last_update_check}"
+                if settings.last_update_check
+                else "Noch nicht geprüft."
+            )
+        )
 
         self._build()
         self._refresh_login_state()
@@ -81,13 +97,38 @@ class SetupDialog(tk.Toplevel):
         self.deiconify()
         self.lift()
         self.focus_force()
-        self.after(100, self._activate_grab)
-
-    def _activate_grab(self) -> None:
         try:
-            if self.winfo_exists() and self.winfo_viewable():
-                self.grab_set()
+            self.attributes("-toolwindow", False)
         except tk.TclError:
+            pass
+        self.after(100, self._ensure_taskbar)
+
+    def _ensure_taskbar(self) -> None:
+        """Sorgt unter Windows für ein eigenes Taskleisten-Fenster.
+
+        Das Hauptfenster der Tray-App ist withdrawn; ohne dieses Flag wird das
+        Einstellungsfenster als Owned Window beim Minimieren unsichtbar und
+        lässt sich nicht aus der Taskleiste wiederherstellen.
+        """
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            hwnd = self.winfo_id()
+            gwl_exstyle = -20
+            ws_ex_appwindow = 0x00040000
+            ws_ex_toolwindow = 0x00000080
+            style = user32.GetWindowLongW(hwnd, gwl_exstyle)
+            style = (style | ws_ex_appwindow) & ~ws_ex_toolwindow
+            user32.SetWindowLongW(hwnd, gwl_exstyle, style)
+            try:
+                user32.SetWindowLongPtrW(hwnd, -8, 0)
+            except AttributeError:
+                user32.SetWindowLongW(hwnd, -8, 0)
+            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0020)
+        except Exception:
             pass
 
     def _release_grab(self) -> None:
@@ -289,7 +330,103 @@ class SetupDialog(tk.Toplevel):
         )
         self.encryption_button.pack(side="right")
 
+        self.danger_frame = tk.Frame(
+            outer,
+            bg="#FFF5F5",
+            highlightbackground="#D64545",
+            highlightthickness=2,
+        )
+        danger_inner = tk.Frame(self.danger_frame, bg="#FFF5F5")
+        danger_inner.pack(fill="x", padx=12, pady=10)
+        tk.Label(
+            danger_inner,
+            text="Danger Zone",
+            bg="#FFF5F5",
+            fg="#B42318",
+            font=("Segoe UI Semibold", 10),
+            anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            danger_inner,
+            text="Wenn du den Schlüssel löschst, können alle Dateien unter "
+            "encrypted/ in Tarkle nicht mehr entschlüsselt werden – auch dann "
+            "nicht, wenn dir das Passwort später wieder einfällt. Die lokalen "
+            "Klartextdateien bleiben erhalten; die verschlüsselten Dateien in "
+            "Tarkle werden entfernt. Zum Bestätigen DELETE eingeben.",
+            bg="#FFF5F5",
+            fg="#7A271A",
+            font=("Segoe UI", 8),
+            wraplength=500,
+            justify="left",
+            anchor="w",
+        ).pack(fill="x", pady=(3, 6))
+        self.danger_button = tk.Button(
+            danger_inner,
+            text="Schlüssel löschen …",
+            command=self._reset_encryption_key,
+            bg="#D64545",
+            fg="white",
+            activebackground="#B42318",
+            activeforeground="white",
+            relief="flat",
+            padx=10,
+            pady=4,
+            cursor="hand2",
+        )
+        self.danger_button.pack(anchor="w")
+
+        self.update_frame = tk.Frame(outer, bg=BACKGROUND)
+        self.update_frame.pack(fill="x", pady=(14, 0))
+        tk.Label(
+            self.update_frame,
+            text="Updates",
+            bg=BACKGROUND,
+            fg=TEXT,
+            font=("Segoe UI", 10),
+            anchor="w",
+        ).pack(fill="x")
+        update_row = tk.Frame(self.update_frame, bg=BACKGROUND)
+        update_row.pack(fill="x", pady=(3, 0))
+        tk.Label(
+            update_row,
+            text="Prüfen:",
+            bg=BACKGROUND,
+            fg=MUTED,
+            font=("Segoe UI", 9),
+        ).pack(side="left")
+        self.update_days_combo = ttk.Combobox(
+            update_row,
+            textvariable=self.update_days_var,
+            values=["Nie", "Täglich", "Alle 7 Tage", "Alle 30 Tage"],
+            state="readonly",
+            width=16,
+        )
+        self.update_days_combo.pack(side="left", padx=(8, 0))
+        self.update_button = ttk.Button(
+            update_row,
+            text="Nach Updates suchen",
+            command=self._check_updates,
+        )
+        self.update_button.pack(side="right")
+        tk.Label(
+            self.update_frame,
+            textvariable=self.update_status_var,
+            bg=BACKGROUND,
+            fg=MUTED,
+            font=("Segoe UI", 8),
+            anchor="w",
+        ).pack(fill="x", pady=(4, 0))
+        tk.Label(
+            self.update_frame,
+            text="Bei einem Update wird die passende Datei automatisch heruntergeladen.",
+            bg=BACKGROUND,
+            fg=MUTED,
+            font=("Segoe UI", 8),
+            anchor="w",
+        ).pack(fill="x", pady=(1, 0))
+
         buttons = tk.Frame(outer, bg=BACKGROUND)
+        self.buttons_frame = buttons
         buttons.pack(fill="x", pady=(18, 0))
         tk.Label(
             buttons,
@@ -415,22 +552,53 @@ class SetupDialog(tk.Toplevel):
         manager.load_cached_key()
         return manager
 
+    @staticmethod
+    def _update_days_label(days: int) -> str:
+        return {
+            0: "Nie",
+            1: "Täglich",
+            7: "Alle 7 Tage",
+            30: "Alle 30 Tage",
+        }.get(days, "Alle 7 Tage")
+
+    def _update_days_value(self) -> int:
+        return {
+            "Nie": 0,
+            "Täglich": 1,
+            "Alle 7 Tage": 7,
+            "Alle 30 Tage": 30,
+        }.get(self.update_days_var.get(), 7)
+
     def _refresh_encryption_state(self) -> None:
         manager = self._encryption_manager()
         if manager is None:
             self.encryption_status_label.config(text="Lokalen Ordner auswählen.")
             self.encryption_button.config(state="disabled")
+            self.danger_frame.pack_forget()
             return
         self.encryption_button.config(state="normal")
         if not manager.enabled:
             self.encryption_status_label.config(text="Nicht eingerichtet.")
             self.encryption_button.config(text="Passwort festlegen …")
+            self.danger_frame.pack_forget()
         elif manager.unlocked:
             self.encryption_status_label.config(text="Aktiv – entsperrt.")
             self.encryption_button.config(text="Passwort ändern …")
+            if not self.danger_frame.winfo_manager():
+                self.danger_frame.pack(
+                    fill="x",
+                    pady=(10, 0),
+                    before=self.update_frame,
+                )
         else:
             self.encryption_status_label.config(text="Aktiv – gesperrt.")
             self.encryption_button.config(text="Entsperren …")
+            if not self.danger_frame.winfo_manager():
+                self.danger_frame.pack(
+                    fill="x",
+                    pady=(10, 0),
+                    before=self.update_frame,
+                )
 
     def _set_encryption_password(self) -> None:
         manager = self._encryption_manager()
@@ -459,10 +627,14 @@ class SetupDialog(tk.Toplevel):
             messagebox.showerror("Verschlüsselung", "Die Passwörter stimmen nicht überein.", parent=self)
             return
         try:
-            manager.set_password(new)
+            manager.set_password(
+                new,
+                allow_existing=self._encryption_reset_allowed,
+            )
         except CryptoError as exc:
             messagebox.showerror("Verschlüsselung", str(exc), parent=self)
             return
+        self._encryption_reset_allowed = False
         messagebox.showinfo(
             "Verschlüsselung",
             "Verschlüsselung eingerichtet.",
@@ -524,6 +696,128 @@ class SetupDialog(tk.Toplevel):
             parent=self,
         )
         self._refresh_encryption_state()
+
+    def _reset_encryption_key(self) -> None:
+        manager = self._encryption_manager()
+        if manager is None or not manager.enabled:
+            return
+        answer = simpledialog.askstring(
+            "DANGER ZONE – Schlüssel löschen",
+            "ACHTUNG: Wenn du den Schlüssel löschst, können alle Dateien unter "
+            "encrypted/ in Tarkle NICHT mehr entschlüsselt werden – auch dann "
+            "nicht, wenn dir das Passwort später wieder einfällt.\n\n"
+            "Die lokalen Klartextdateien bleiben erhalten. Die verschlüsselten "
+            "Dateien in Tarkle werden entfernt.\n\n"
+            "Tippe DELETE, um fortzufahren:",
+            parent=self,
+        )
+        if answer != "DELETE":
+            if answer is not None:
+                messagebox.showinfo(
+                    "Abgebrochen",
+                    "Es wurde nichts gelöscht.",
+                    parent=self,
+                )
+            return
+        self.danger_button.config(state="disabled", text="Lösche …")
+        self.encryption_status_label.config(text="Lösche verschlüsselte Daten …")
+
+        def worker() -> None:
+            try:
+                if self.on_reset_encryption is not None:
+                    ok, message = self.on_reset_encryption()
+                else:
+                    manager.reset_key()
+                    ok, message = True, "Schlüssel gelöscht."
+            except Exception as exc:  # noqa: BLE001 - im UI anzeigen
+                ok, message = False, str(exc)
+            self._ui_queue.put(
+                lambda ok=ok, message=message: self._reset_done(ok, message)
+            )
+
+        threading.Thread(
+            target=worker,
+            name="tarklone-reset-encryption",
+            daemon=True,
+        ).start()
+
+    def _reset_done(self, ok: bool, message: str) -> None:
+        self.danger_button.config(state="normal", text="Schlüssel löschen …")
+        if ok:
+            self._encryption_reset_allowed = True
+            self._refresh_encryption_state()
+            messagebox.showinfo(
+                "Verschlüsselung zurückgesetzt",
+                message,
+                parent=self,
+            )
+        else:
+            self._refresh_encryption_state()
+            messagebox.showerror(
+                "Zurücksetzen fehlgeschlagen",
+                message,
+                parent=self,
+            )
+
+    def _check_updates(self) -> None:
+        if self._update_running:
+            return
+        self._update_running = True
+        self.update_button.config(state="disabled")
+        self.update_status_var.set("Prüfe auf Updates …")
+
+        def worker() -> None:
+            try:
+                info = check_for_update()
+                if info is None:
+                    self._ui_queue.put(
+                        lambda: self._update_done(None, None, None)
+                    )
+                else:
+                    self._ui_queue.put(
+                        lambda info=info: self.update_status_var.set(
+                            f"Update {info.version} gefunden – lade herunter …"
+                        )
+                    )
+                    path = download_update(info)
+                    self._ui_queue.put(
+                        lambda info=info, path=path: self._update_done(
+                            info, path, None
+                        )
+                    )
+            except Exception as exc:
+                self._ui_queue.put(
+                    lambda exc=exc: self._update_done(None, None, exc)
+                )
+
+        threading.Thread(
+            target=worker,
+            name="tarklone-update-check",
+            daemon=True,
+        ).start()
+
+    def _update_done(self, info, path, error) -> None:  # noqa: ANN001
+        self._update_running = False
+        self.update_button.config(state="normal")
+        self.settings.last_update_check = datetime.now().isoformat(timespec="seconds")
+        try:
+            save_settings(self.settings)
+        except OSError:
+            pass
+        if error is not None:
+            self.update_status_var.set(f"Fehler: {error}")
+            messagebox.showerror("Updateprüfung", str(error), parent=self)
+        elif info is not None and path is not None:
+            self.update_status_var.set(
+                f"Update {info.version} heruntergeladen: {path}"
+            )
+            messagebox.showinfo(
+                "Update heruntergeladen",
+                f"Version {info.version} wurde heruntergeladen:\n{path}",
+                parent=self,
+            )
+        else:
+            self.update_status_var.set(f"Aktuell (Version {__version__}).")
 
     def _encryption_action(self) -> None:
         manager = self._encryption_manager()
@@ -621,6 +915,7 @@ class SetupDialog(tk.Toplevel):
         self.settings.sync_deletions = bool(self.deletions_var.get())
         self.settings.start_minimized = bool(self.start_minimized_var.get())
         self.settings.launch_at_login = bool(self.launch_var.get())
+        self.settings.update_check_interval_days = self._update_days_value()
 
         errors = self.settings.validation_errors()
         if errors:

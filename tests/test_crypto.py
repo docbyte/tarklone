@@ -100,6 +100,27 @@ def test_tampered_ciphertext_is_rejected(tmp_path: Path) -> None:
         manager.decrypt_file(encrypted, tmp_path / "out")
 
 
+def test_set_password_can_allow_existing_files_after_reset(tmp_path: Path) -> None:
+    encrypted_dir = tmp_path / "encrypted"
+    encrypted_dir.mkdir()
+    (encrypted_dir / "local.txt").write_text("local plaintext", encoding="utf-8")
+    manager = make_manager(tmp_path)
+    with pytest.raises(CryptoError):
+        manager.set_password("password123")
+    manager.set_password("password123", allow_existing=True)
+    assert manager.enabled
+
+
+def test_reset_key_removes_keyfile_and_master(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    manager.set_password("password123")
+    (tmp_path / "encrypted" / "keep.txt").write_text("keep", encoding="utf-8")
+    manager.reset_key()
+    assert not manager.keyfile.exists()
+    assert not manager.unlocked
+    assert (tmp_path / "encrypted" / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
 def test_enabling_requires_empty_encrypted_folder(tmp_path: Path) -> None:
     encrypted_dir = tmp_path / "encrypted"; encrypted_dir.mkdir()
     (encrypted_dir / "existing.txt").write_text("plain", encoding="utf-8")

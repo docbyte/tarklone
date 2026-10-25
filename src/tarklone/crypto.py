@@ -112,12 +112,12 @@ class EncryptionManager:
         self.encrypted_dir.mkdir(parents=True, exist_ok=True)
         return self.encrypted_dir
 
-    def set_password(self, password: str) -> None:
+    def set_password(self, password: str, *, allow_existing: bool = False) -> None:
         if self.keyfile.exists():
             raise CryptoError("Es ist bereits ein Passwort gesetzt.")
         if len(password) < 8:
             raise CryptoError("Das Passwort muss mindestens 8 Zeichen lang sein.")
-        if self.encrypted_dir.exists():
+        if self.encrypted_dir.exists() and not allow_existing:
             existing = [
                 path
                 for path in self.encrypted_dir.rglob("*")
@@ -178,6 +178,22 @@ class EncryptionManager:
     def lock(self) -> None:
         self.master_key = None
         self._name_key_cache = None
+
+    def reset_key(self) -> None:
+        """Löscht den lokalen Schlüssel und den Keyring-Cache.
+
+        Die verschlüsselten Remote-Dateien werden vom Aufrufer entfernt; die
+        lokalen Klartextdateien bleiben unangetastet.
+        """
+        self.keyfile.unlink(missing_ok=True)
+        self.master_key = None
+        self._name_key_cache = None
+        try:
+            import keyring
+
+            keyring.delete_password("tarklone", "crypto-master")
+        except Exception:
+            pass
 
     def _cache_master(self, master: bytes) -> None:
         if not self.cache_in_keyring:

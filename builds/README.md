@@ -90,6 +90,6 @@ GitHub-Release angehängt.
 
 ## Version
 
-Alle Builds bleiben bei **1.0**. Die Version wird zentral aus
+Alle Builds bleiben bei **1.1**. Die Version wird zentral aus
 `pyproject.toml`, `src/tarklone/__init__.py` und
 `packaging/version_info.txt` übernommen.

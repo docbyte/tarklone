@@ -19,12 +19,19 @@ from watchdog.events import FileSystemEventHandler
 
 from . import __version__
 from .auth import AuthError, NotLoggedIn, OAuthClient, TokenStore
-from .config import ensure_dirs, load_settings, log_path, state_path
+from .config import (
+    ensure_dirs,
+    load_settings,
+    log_path,
+    save_settings,
+    state_path,
+)
 from .crypto import KEYFILE_NAME, EncryptionManager
 from .encrypted_remote import EncryptionAdapter
 from .state import SyncState
 from .sync import RemoteUnsupported, SyncBusy, SyncEngine, SyncError
 from .ui import SetupDialog
+from .updates import check_for_update, download_update
 from .webapi import WebAuthError
 
 logger = logging.getLogger("tarklone")
@@ -135,6 +142,7 @@ class TarkloneApp:
         self.root: tk.Tk | None = None
         self._last_error = ""
         self._ui_queue: queue.Queue = queue.Queue()
+        self._update_check_running = False
 
     def _read_last_sync(self) -> float:
         raw = self.state.get_meta("last_sync")
@@ -296,6 +304,7 @@ class TarkloneApp:
         if not self.root:
             return
         if self._settings_window and self._settings_window.winfo_exists():
+            self._settings_window.deiconify()
             self._settings_window.lift()
             self._settings_window.focus_force()
             return
@@ -305,6 +314,7 @@ class TarkloneApp:
             self._on_settings_saved,
             first_run=first_run,
             on_cancel=self._on_settings_cancelled,
+            on_reset_encryption=self.reset_encryption,
         )
 
     def _on_settings_saved(self, settings) -> None:  # noqa: ANN001
@@ -356,6 +366,7 @@ class TarkloneApp:
     def _scheduler(self) -> None:
         while not self.stop_event.is_set():
             time.sleep(1.0)
+            self._maybe_check_updates()
             if self.paused or self._syncing:
                 continue
             if not self.settings.is_configured or TokenStore().load() is None:
@@ -366,6 +377,101 @@ class TarkloneApp:
             if due or local_due:
                 self.local_event.clear()
                 self.sync_event.set()
+
+    def _maybe_check_updates(self) -> None:
+        if self._update_check_running:
+            return
+        days = int(self.settings.update_check_interval_days or 0)
+        if days <= 0:
+            return
+        last = 0.0
+        if self.settings.last_update_check:
+            try:
+                last = datetime.fromisoformat(self.settings.last_update_check).timestamp()
+            except ValueError:
+                last = 0.0
+        if last and (time.time() - last) < days * 86400:
+            return
+        self._update_check_running = True
+        self.settings.last_update_check = datetime.now().isoformat(timespec="seconds")
+        try:
+            save_settings(self.settings)
+        except OSError:
+            pass
+
+        def worker() -> None:
+            try:
+                info = check_for_update()
+                if info is not None:
+                    path = download_update(info)
+                    logger.info("Update %s heruntergeladen: %s", info.version, path)
+                    self._notify(
+                        f"Update {info.version} heruntergeladen:\n{path}",
+                        "tarklone – Update",
+                    )
+                    self._set_status(f"Update {info.version} heruntergeladen")
+            except Exception as exc:  # noqa: BLE001 - Hintergrundprüfung
+                logger.warning("Updateprüfung fehlgeschlagen: %s", exc)
+            finally:
+                self._update_check_running = False
+
+        threading.Thread(
+            target=worker,
+            name="tarklone-update-check",
+            daemon=True,
+        ).start()
+
+    def reset_encryption(self) -> tuple[bool, str]:
+        """Löscht Schlüssel und verschlüsselte Remote-Dateien.
+
+        Lokale Klartextdateien unter encrypted/ bleiben erhalten. Die
+        verschlüsselten Remote-Dateien werden in den Tarkle-Papierkorb
+        verschoben; danach kann ein neues Passwort gesetzt werden.
+        """
+        if not self.settings.is_configured:
+            return False, "Die Einrichtung ist noch nicht abgeschlossen."
+        if not self._sync_lock.acquire(timeout=30):
+            return False, "Es läuft gerade ein Sync. Bitte gleich erneut versuchen."
+        try:
+            from .tarkle import TarkleRemote
+
+            oauth = OAuthClient(self.settings)
+            try:
+                token = oauth.ensure_valid()
+            finally:
+                oauth.close()
+            remote = TarkleRemote(self.settings, token)
+            try:
+                entries = [
+                    entry
+                    for entry in remote.list_tree()
+                    if entry.path == "encrypted"
+                    or entry.path.startswith("encrypted/")
+                ]
+                for entry in sorted(
+                    entries,
+                    key=lambda item: (item.kind != "file", item.path.count("/")),
+                    reverse=True,
+                ):
+                    remote.delete(entry)
+            finally:
+                remote.close()
+            self.state.delete_prefix("encrypted")
+            manager = EncryptionManager(Path(self.settings.local_folder))
+            manager.reset_key()
+            logger.warning("Verschlüsselungsschlüssel und Remote-Daten zurückgesetzt")
+            self._set_status("Verschlüsselung zurückgesetzt")
+            return (
+                True,
+                "Schlüssel gelöscht. Die verschlüsselten Dateien in Tarkle wurden "
+                "entfernt. Du kannst jetzt ein neues Passwort setzen; die lokalen "
+                "Klartextdateien bleiben erhalten.",
+            )
+        except Exception as exc:  # noqa: BLE001 - im UI anzeigen
+            logger.exception("Verschlüsselung zurücksetzen fehlgeschlagen")
+            return False, str(exc)
+        finally:
+            self._sync_lock.release()
 
     def _sync_worker(self) -> None:
         while not self.stop_event.is_set():

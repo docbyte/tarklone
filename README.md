@@ -1,4 +1,4 @@
-# tarklone 1.0
+# tarklone 1.1
 
 Bidirektionaler Ordner-Sync zwischen Windows und [Tarkle](https://tarkle.com) – als Tray-App.
 
@@ -22,6 +22,8 @@ Bidirektionaler Ordner-Sync zwischen Windows und [Tarkle](https://tarkle.com) �
 - Löschungen standardmäßig **nicht** übertragen; lokale Löschungen landen in `.tarklone/trash`
 - Tray-App mit Status, manuellem Sync, Pause und Einstellungen
 - Hintergrund-Sync per Zeitintervall und Dateiüberwachung (`watchdog`)
+- Update-Prüfung mit automatischem Download der passenden Plattform-Datei
+- Danger Zone zum Zurücksetzen des Verschlüsselungsschlüssels
 - Schutz vor Pfad-Traversal und versehentlichem Löschen
 
 ## Installation (Entwicklung)
@@ -130,6 +132,30 @@ werden. Der Ordner wird beim Setzen des Passworts angelegt.
 - Sehr lange Datei-/Ordnernamen können das Token-Limit überschreiten; dann
   meldet der Sync einen Fehler und der Name muss gekürzt werden.
 
+### Danger Zone: Schlüssel löschen
+
+Wenn ein Passwort gesetzt ist, erscheint in den Einstellungen eine rot
+umrahmte **Danger Zone**. Dort kann der Schlüssel gelöscht werden, um ein neues
+Passwort zu setzen.
+
+- Bestätigung nur durch Eingabe von `DELETE`
+- Die verschlüsselten Dateien in Tarkle werden entfernt
+- Die lokalen Klartextdateien bleiben erhalten
+- Die alten Daten können danach **nicht mehr entschlüsselt werden – auch wenn
+  das Passwort später wieder einfällt**
+- Nach dem Zurücksetzen kann mit den lokalen Dateien ein neuer Schlüssel
+  erzeugt und erneut hochgeladen werden
+
+### Updates
+
+- **Nach Updates suchen** prüft das öffentliche GitHub-Release.
+- Gibt es eine neuere Version, wird die passende Datei für Windows, Ubuntu oder
+  macOS automatisch heruntergeladen (standardmäßig in den Downloads-Ordner).
+- Die Installation erfolgt manuell; die laufende EXE wird nicht überschrieben.
+- Das Intervall ist einstellbar: **Nie**, **Täglich**, **Alle 7 Tage** oder
+  **Alle 30 Tage**.
+- Die Update-Prüfung läuft im Hintergrund; Fehler werden nur protokolliert.
+
 ### Free- und Pro-Plan
 
 - **Pro:** geänderte Dateien werden über die Tarkle-Dateiversionierung aktualisiert.
@@ -180,7 +206,8 @@ Unter `builds/` liegen Varianten für Ubuntu, macOS und eine reine CLI:
 
 Details und Voraussetzungen: `builds/README.md`. Der GitHub-Actions-Workflow
 `.github/workflows/build-platforms.yml` baut alle Varianten und hängt sie bei
-einem Tag `v*` an das Release.
+einem Tag `v*` an das Release. Die Update-Prüfung nutzt die öffentliche
+GitHub-API und das neueste Release.
 
 Die GUI-Varianten sind unter Linux/macOS derzeit **experimentell**; die CLI
 ist auf allen drei Plattformen die robusteste Variante.

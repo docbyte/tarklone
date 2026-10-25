@@ -77,6 +77,9 @@ class Settings:
     launch_at_login: bool = False
     log_level: str = "INFO"
 
+    update_check_interval_days: int = 7
+    last_update_check: str = ""
+
     oauth_client_id: str = ""
     oauth_redirect_uri: str = ""
     oauth_redirect_port: int = 53682
@@ -101,6 +104,8 @@ class Settings:
             errors.append("Das Sync-Intervall muss mindestens 15 Sekunden betragen.")
         if self.conflict_policy not in {"copy", "newest"}:
             errors.append("Unbekannte Konfliktstrategie.")
+        if self.update_check_interval_days < 0:
+            errors.append("Das Update-Intervall darf nicht negativ sein.")
         return errors
 
 

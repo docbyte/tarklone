@@ -100,6 +100,15 @@ class SyncState:
             self._conn.execute("DELETE FROM entries")
             self._conn.commit()
 
+    def delete_prefix(self, prefix: str) -> None:
+        prefix = prefix.replace("\\", "/").strip("/")
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM entries WHERE path = ? OR path LIKE ?",
+                (prefix, prefix + "/%"),
+            )
+            self._conn.commit()
+
     def get_meta(self, key: str, default: str = "") -> str:
         with self._lock:
             row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
