@@ -175,9 +175,16 @@ class EncryptionManager:
         self._name_key_cache = None
         return True
 
-    def lock(self) -> None:
+    def lock(self, *, clear_cache: bool = False) -> None:
         self.master_key = None
         self._name_key_cache = None
+        if clear_cache and self.cache_in_keyring:
+            try:
+                import keyring
+
+                keyring.delete_password("tarklone", "crypto-master")
+            except Exception:
+                pass
 
     def reset_key(self) -> None:
         """Löscht den lokalen Schlüssel und den Keyring-Cache.

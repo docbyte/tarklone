@@ -111,6 +111,26 @@ def test_set_password_can_allow_existing_files_after_reset(tmp_path: Path) -> No
     assert manager.enabled
 
 
+def test_lock_clears_cached_master_but_keeps_keyfile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import keyring
+
+    values: dict[tuple[str, str], str] = {}
+    monkeypatch.setattr(keyring, "set_password", lambda s, u, v: values.__setitem__((s, u), v))
+    monkeypatch.setattr(keyring, "get_password", lambda s, u: values.get((s, u)))
+    monkeypatch.setattr(keyring, "delete_password", lambda s, u: values.pop((s, u), None))
+
+    manager = EncryptionManager(tmp_path, iterations=10_000)
+    manager.set_password("password123")
+    assert values.get(("tarklone", "crypto-master"))
+    manager.lock(clear_cache=True)
+    assert not manager.unlocked
+    assert not values.get(("tarklone", "crypto-master"))
+    assert manager.keyfile.is_file()
+
+
 def test_reset_key_removes_keyfile_and_master(tmp_path: Path) -> None:
     manager = make_manager(tmp_path)
     manager.set_password("password123")

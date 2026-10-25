@@ -97,39 +97,6 @@ class SetupDialog(tk.Toplevel):
         self.deiconify()
         self.lift()
         self.focus_force()
-        try:
-            self.attributes("-toolwindow", False)
-        except tk.TclError:
-            pass
-        self.after(100, self._ensure_taskbar)
-
-    def _ensure_taskbar(self) -> None:
-        """Sorgt unter Windows für ein eigenes Taskleisten-Fenster.
-
-        Das Hauptfenster der Tray-App ist withdrawn; ohne dieses Flag wird das
-        Einstellungsfenster als Owned Window beim Minimieren unsichtbar und
-        lässt sich nicht aus der Taskleiste wiederherstellen.
-        """
-        if sys.platform != "win32":
-            return
-        try:
-            import ctypes
-
-            user32 = ctypes.windll.user32
-            hwnd = self.winfo_id()
-            gwl_exstyle = -20
-            ws_ex_appwindow = 0x00040000
-            ws_ex_toolwindow = 0x00000080
-            style = user32.GetWindowLongW(hwnd, gwl_exstyle)
-            style = (style | ws_ex_appwindow) & ~ws_ex_toolwindow
-            user32.SetWindowLongW(hwnd, gwl_exstyle, style)
-            try:
-                user32.SetWindowLongPtrW(hwnd, -8, 0)
-            except AttributeError:
-                user32.SetWindowLongW(hwnd, -8, 0)
-            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0020)
-        except Exception:
-            pass
 
     def _release_grab(self) -> None:
         try:
@@ -329,6 +296,12 @@ class SetupDialog(tk.Toplevel):
             width=20,
         )
         self.encryption_button.pack(side="right")
+        self.lock_button = ttk.Button(
+            enc_row,
+            text="Sperren",
+            command=self._lock_encryption,
+            width=10,
+        )
 
         self.danger_frame = tk.Frame(
             outer,
@@ -348,16 +321,10 @@ class SetupDialog(tk.Toplevel):
         ).pack(fill="x")
         tk.Label(
             danger_inner,
-            text="Wenn du den Schlüssel löschst, können alle Dateien unter "
-            "encrypted/ in Tarkle nicht mehr entschlüsselt werden – auch dann "
-            "nicht, wenn dir das Passwort später wieder einfällt. Die lokalen "
-            "Klartextdateien bleiben erhalten; die verschlüsselten Dateien in "
-            "Tarkle werden entfernt. Zum Bestätigen DELETE eingeben.",
+            text="Schlüssel löschen",
             bg="#FFF5F5",
             fg="#7A271A",
             font=("Segoe UI", 8),
-            wraplength=500,
-            justify="left",
             anchor="w",
         ).pack(fill="x", pady=(3, 6))
         self.danger_button = tk.Button(
@@ -577,6 +544,7 @@ class SetupDialog(tk.Toplevel):
             self.danger_frame.pack_forget()
             return
         self.encryption_button.config(state="normal")
+        self.lock_button.pack_forget()
         if not manager.enabled:
             self.encryption_status_label.config(text="Nicht eingerichtet.")
             self.encryption_button.config(text="Passwort festlegen …")
@@ -584,6 +552,7 @@ class SetupDialog(tk.Toplevel):
         elif manager.unlocked:
             self.encryption_status_label.config(text="Aktiv – entsperrt.")
             self.encryption_button.config(text="Passwort ändern …")
+            self.lock_button.pack(side="right", padx=(0, 8))
             if not self.danger_frame.winfo_manager():
                 self.danger_frame.pack(
                     fill="x",
@@ -638,6 +607,18 @@ class SetupDialog(tk.Toplevel):
         messagebox.showinfo(
             "Verschlüsselung",
             "Verschlüsselung eingerichtet.",
+            parent=self,
+        )
+        self._refresh_encryption_state()
+
+    def _lock_encryption(self) -> None:
+        manager = self._encryption_manager()
+        if manager is None or not manager.unlocked:
+            return
+        manager.lock(clear_cache=True)
+        messagebox.showinfo(
+            "Verschlüsselung",
+            "Verschlüsselung gesperrt.",
             parent=self,
         )
         self._refresh_encryption_state()
