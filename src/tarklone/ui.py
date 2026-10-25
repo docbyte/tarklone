@@ -286,19 +286,6 @@ class SetupDialog(tk.Toplevel):
             width=20,
         )
         self.encryption_button.pack(side="right")
-        tk.Label(
-            encryption,
-            text="Dateien unter encrypted/ werden beim Upload mit AES-256-GCM "
-            "verschlüsselt und beim Download entschlüsselt. Eine Passwortänderung "
-            "verpackt nur den Master-Key neu – Dateien werden nicht neu verschlüsselt. "
-            "Die Schlüsseldatei encrypted/.tarklone-key.json wird mitgesynct.",
-            bg=BACKGROUND,
-            fg=MUTED,
-            font=("Segoe UI", 8),
-            wraplength=520,
-            justify="left",
-            anchor="w",
-        ).pack(fill="x", pady=(3, 0))
 
         buttons = tk.Frame(outer, bg=BACKGROUND)
         buttons.pack(fill="x", pady=(18, 0))
@@ -476,9 +463,7 @@ class SetupDialog(tk.Toplevel):
             return
         messagebox.showinfo(
             "Verschlüsselung",
-            "Der Ordner „encrypted“ wurde erstellt.\n\n"
-            "Dateien darin werden ab jetzt beim Upload AES-256-verschlüsselt. "
-            "Die Schlüsseldatei wird mitgesynct.",
+            "Verschlüsselung eingerichtet.",
             parent=self,
         )
         self._refresh_encryption_state()
@@ -497,7 +482,7 @@ class SetupDialog(tk.Toplevel):
         except CryptoError as exc:
             messagebox.showerror("Verschlüsselung", str(exc), parent=self)
             return
-        messagebox.showinfo("Verschlüsselung", "Der encrypted-Ordner ist entsperrt.", parent=self)
+        messagebox.showinfo("Verschlüsselung", "Verschlüsselung entsperrt.", parent=self)
         self._refresh_encryption_state()
 
     def _change_encryption_password(self, manager: EncryptionManager) -> None:
@@ -533,8 +518,7 @@ class SetupDialog(tk.Toplevel):
             return
         messagebox.showinfo(
             "Verschlüsselung",
-            "Das Passwort wurde geändert. Die vorhandenen Dateien wurden nicht "
-            "neu verschlüsselt; nur der Master-Key wurde neu verpackt.",
+            "Passwort geändert.",
             parent=self,
         )
         self._refresh_encryption_state()
