@@ -188,12 +188,13 @@ class EncryptionManager:
         self.keyfile.unlink(missing_ok=True)
         self.master_key = None
         self._name_key_cache = None
-        try:
-            import keyring
+        if self.cache_in_keyring:
+            try:
+                import keyring
 
-            keyring.delete_password("tarklone", "crypto-master")
-        except Exception:
-            pass
+                keyring.delete_password("tarklone", "crypto-master")
+            except Exception:
+                pass
 
     def _cache_master(self, master: bytes) -> None:
         if not self.cache_in_keyring:
