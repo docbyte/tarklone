@@ -80,6 +80,7 @@ python -m venv .venv
 | Zustand/Sync-Datenbank | `%LOCALAPPDATA%\docbyte\tarklone\state.sqlite3` |
 | Protokoll | `%LOCALAPPDATA%\docbyte\tarklone\Logs\tarklone.log` |
 | Zugriffstoken | Windows Credential Manager, Dienst `tarklone` |
+| Token-Fallback (headless) | `<AppData>\tarklone\token.json`, Dateimodus 0600 |
 | Verschlüsselungs-Keyfile | `<Sync-Ordner>\encrypted\.tarklone-key.json` |
 
 ## Sync-Verhalten
@@ -208,3 +209,6 @@ Windows-Credential-Manager-Backend explizit im Bundle.
   werden (z. B. Cryptomator/ BitLocker).
 - Der Sync ist ein Datei-Sync, kein Bieterverfahren: Bei gleichzeitigen Änderungen werden
   Konfliktkopien erzeugt, nichts wird still überschrieben.
+- Wenn kein Keyring/SecretService verfügbar ist (z. B. headless Linux/WSL), wird der
+  OAuth-Token als Fallback in `token.json` mit Dateimodus 0600 gespeichert. Das ist
+  weniger geschützt als ein Keyring; auf Mehrbenutzersystemen Keyring bevorzugen.

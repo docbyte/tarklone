@@ -3,18 +3,20 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import secrets
 import threading
 import time
 import webbrowser
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
-from .config import Settings, save_settings
+from .config import Settings, data_dir, save_settings
 
 SUPABASE_URL = "https://dzvfdojgelkzppeaqncy.supabase.co"
 AUTH_BASE = f"{SUPABASE_URL}/auth/v1"
@@ -108,20 +110,24 @@ def _email_from_tokens(*tokens: str) -> str:
 
 
 class TokenStore:
-    def __init__(self, service: str = SERVICE_NAME, username: str = TOKEN_USERNAME):
+    """Speichert den OAuth-Token im Keyring, sonst in einer 0600-Datei.
+
+    Der Datei-Fallback ist für headless Linux-/WSL-Systeme ohne
+    SecretService/Keyring gedacht. Auf Windows/macOS wird normalerweise der
+    jeweilige Keyring verwendet.
+    """
+
+    def __init__(
+        self,
+        service: str = SERVICE_NAME,
+        username: str = TOKEN_USERNAME,
+        fallback_path: Path | None = None,
+    ):
         self.service = service
         self.username = username
+        self.fallback_path = fallback_path or (data_dir() / "token.json")
 
-    def load(self) -> Token | None:
-        try:
-            import keyring
-
-            raw = keyring.get_password(self.service, self.username)
-        except Exception as exc:  # keyring backend can fail in unusual environments
-            raise TokenStoreError(
-                "Windows Credential Manager ist nicht verfügbar. "
-                "Bitte keyring installieren bzw. den Anmeldedienst prüfen."
-            ) from exc
+    def _parse(self, raw: str | None) -> Token | None:
         if not raw:
             return None
         try:
@@ -132,20 +138,50 @@ class TokenStore:
             return None
         return Token.from_dict(data)
 
-    def save(self, token: Token) -> None:
+    def load(self) -> Token | None:
+        raw_keyring = None
         try:
             import keyring
 
-            keyring.set_password(
-                self.service,
-                self.username,
-                json.dumps(token.to_dict(), ensure_ascii=False),
-            )
-        except Exception as exc:
-            raise TokenStoreError(
-                "Der Login konnte nicht sicher gespeichert werden "
-                "(Windows Credential Manager)."
-            ) from exc
+            raw_keyring = keyring.get_password(self.service, self.username)
+        except Exception:
+            raw_keyring = None
+        token = self._parse(raw_keyring)
+        if token is not None:
+            return token
+        try:
+            raw_file = self.fallback_path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        return self._parse(raw_file)
+
+    def _save_fallback(self, raw: str) -> None:
+        self.fallback_path.parent.mkdir(parents=True, exist_ok=True)
+        temp = self.fallback_path.with_suffix(self.fallback_path.suffix + ".tmp")
+        temp.write_text(raw, encoding="utf-8")
+        try:
+            os.chmod(temp, 0o600)
+        except OSError:
+            pass
+        os.replace(temp, self.fallback_path)
+
+    def save(self, token: Token) -> None:
+        raw = json.dumps(token.to_dict(), ensure_ascii=False)
+        stored = False
+        try:
+            import keyring
+
+            keyring.set_password(self.service, self.username, raw)
+            stored = True
+        except Exception:
+            stored = False
+        if stored:
+            try:
+                self.fallback_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        else:
+            self._save_fallback(raw)
 
     def delete(self) -> None:
         try:
@@ -153,6 +189,10 @@ class TokenStore:
 
             keyring.delete_password(self.service, self.username)
         except Exception:
+            pass
+        try:
+            self.fallback_path.unlink(missing_ok=True)
+        except OSError:
             pass
 
 

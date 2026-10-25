@@ -76,9 +76,10 @@ tarklone-cli sync --dry-run --verbose
 tarklone-cli sync
 ```
 
-Auf headless Linux-Systemen muss für die sichere Token-Ablage ein
-SecretService (z. B. GNOME Keyring) laufen. Ohne Keyring schlägt der
-Token-Speicher mit einer klaren Meldung fehl.
+Auf headless Linux-Systemen wird der OAuth-Token ohne SecretService als
+Fallback in `token.json` (Dateimodus 0600) gespeichert. Ein Keyring
+(z. B. GNOME Keyring) ist sicherer und wird bevorzugt, ist aber für die CLI
+nicht zwingend erforderlich.
 
 ## GitHub Actions
 

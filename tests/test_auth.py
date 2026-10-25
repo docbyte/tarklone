@@ -60,7 +60,10 @@ def test_callback_server_ignores_other_paths() -> None:
         server.server_close()
 
 
-def test_token_store_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_token_store_roundtrip(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
     values: dict[tuple[str, str], str] = {}
 
     def set_password(service: str, username: str, value: str) -> None:
@@ -76,7 +79,7 @@ def test_token_store_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(keyring, "get_password", get_password)
     monkeypatch.setattr(keyring, "delete_password", delete_password)
 
-    store = TokenStore()
+    store = TokenStore(fallback_path=tmp_path / "token.json")
     assert store.load() is None
     token = Token(
         access_token="access",
@@ -92,6 +95,29 @@ def test_token_store_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
     assert loaded.email == "a@example.com"
     store.delete()
     assert store.load() is None
+
+
+def test_token_store_fallback_without_keyring(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    def fail(*args, **kwargs):
+        raise RuntimeError("no keyring")
+
+    monkeypatch.setattr(keyring, "set_password", fail)
+    monkeypatch.setattr(keyring, "get_password", fail)
+    monkeypatch.setattr(keyring, "delete_password", fail)
+
+    fallback = tmp_path / "token.json"
+    store = TokenStore(fallback_path=fallback)
+    token = Token(access_token="access", refresh_token="refresh", email="a@example.com")
+    store.save(token)
+    assert fallback.is_file()
+    loaded = store.load()
+    assert loaded is not None
+    assert loaded.access_token == "access"
+    store.delete()
+    assert not fallback.exists()
 
 
 def test_token_from_payload() -> None:

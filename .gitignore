@@ -17,3 +17,4 @@ htmlcov/
 probe.json
 console-*.txt
 assets/generated/
+builds/ci-artifacts/
