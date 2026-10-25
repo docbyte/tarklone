@@ -7,6 +7,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
+from . import __version__
 from .auth import OAuthClient, Token, TokenStore
 from .config import Settings, save_settings
 
@@ -256,6 +257,14 @@ class SetupDialog(tk.Toplevel):
 
         buttons = tk.Frame(outer, bg=BACKGROUND)
         buttons.pack(fill="x", pady=(18, 0))
+        tk.Label(
+            buttons,
+            text=f"Version {__version__}",
+            bg=BACKGROUND,
+            fg=MUTED,
+            font=("Segoe UI", 8),
+            anchor="w",
+        ).pack(side="left", anchor="s", pady=(0, 3))
         ttk.Button(buttons, text="Speichern", command=self._save, width=14).pack(side="right")
         ttk.Button(buttons, text="Abbrechen", command=self._close, width=12).pack(
             side="right", padx=(0, 8)
