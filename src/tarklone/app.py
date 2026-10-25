@@ -148,6 +148,17 @@ class TarkloneApp:
         else:
             logger.info("Konfiguration geladen: %s", self.settings.local_folder)
 
+        # Diagnose-/Test-Hook: beendet die App nach X Sekunden, ohne dass
+        # jemand das Tray-Menü bedienen muss. Im Normalbetrieb ungesetzt.
+        test_quit = os.environ.get("TARKLONE_TEST_QUIT_AFTER", "").strip()
+        if test_quit:
+            try:
+                delay_ms = max(1000, int(float(test_quit) * 1000))
+            except ValueError:
+                delay_ms = 0
+            if delay_ms:
+                self.root.after(delay_ms, self._action_quit)
+
         try:
             self.root.mainloop()
         finally:
@@ -158,8 +169,11 @@ class TarkloneApp:
         logger.exception("Tkinter-Fehler", exc_info=(exc_type, exc_value, exc_traceback))
 
     def _poll_ui_queue(self) -> None:
-        if self.stop_event.is_set() or not self.root:
+        if not self.root:
             return
+        # Auch bei gesetztem stop_event müssen noch eingereihte Callbacks
+        # (insbesondere _shutdown) ausgeführt werden. Erst danach wird das
+        # Polling beendet.
         try:
             while True:
                 callback = self._ui_queue.get_nowait()
@@ -169,7 +183,7 @@ class TarkloneApp:
                     logger.exception("UI-Callback fehlgeschlagen")
         except queue.Empty:
             pass
-        if self.root:
+        if self.root and not self.stop_event.is_set():
             try:
                 self.root.after(100, self._poll_ui_queue)
             except tk.TclError:
@@ -247,9 +261,9 @@ class TarkloneApp:
             self._notify("Noch keine Logdatei vorhanden.")
 
     def _action_quit(self, icon=None, item=None) -> None:
-        self.stop_event.set()
         if self.root:
             self._ui_queue.put(self._shutdown)
+        self.stop_event.set()
 
     def _notify(self, message: str, title: str = "tarklone") -> None:
         if self.icon:
@@ -434,28 +448,45 @@ class TarkloneApp:
             return
         self.stop_event.set()
         logger.info("tarklone beendet")
+
+        # Falls ein nicht-daemonisierter Tray-/Watcher-Thread das Beenden
+        # blockiert, wird der Prozess nach kurzer Frist sauber erzwungen.
+        def force_exit() -> None:
+            time.sleep(3.0)
+            logger.warning("Erzwungenes Beenden nach Shutdown-Timeout")
+            logging.shutdown()
+            os._exit(0)
+
+        threading.Thread(
+            target=force_exit,
+            name="tarklone-force-exit",
+            daemon=True,
+        ).start()
+
         if self._watcher:
             try:
                 self._watcher.stop()
+                self._watcher.join(timeout=2)
             except Exception:
-                pass
+                logger.debug("Watcher konnte nicht sauber beendet werden", exc_info=True)
             self._watcher = None
         if self.icon:
             try:
                 self.icon.stop()
             except Exception:
-                pass
+                logger.debug("Tray-Icon konnte nicht sauber beendet werden", exc_info=True)
             self.icon = None
         if self.root:
             try:
                 self.root.quit()
+                self.root.destroy()
             except Exception:
-                pass
+                logger.debug("Tk-Fenster konnte nicht sauber beendet werden", exc_info=True)
             self.root = None
         try:
             self.state.close()
         except Exception:
-            pass
+            logger.debug("Zustandsdatenbank konnte nicht geschlossen werden", exc_info=True)
 
 
 def main() -> int:
