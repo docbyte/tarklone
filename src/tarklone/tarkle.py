@@ -41,6 +41,10 @@ class TarkleRemote:
         self.mcp.close()
         self.web.close()
 
+    @property
+    def target_path(self) -> str:
+        return self._target_path
+
     def _mcp_call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         payload = dict(arguments)
         payload.setdefault("context", _CONTEXT)

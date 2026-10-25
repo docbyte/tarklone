@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tarklone.webapi import (
+    TarkleWeb,
     _file_array,
     _format_size,
     _item_type,
@@ -10,6 +13,7 @@ from tarklone.webapi import (
     _rsc_text,
     _storage_usage_from_text,
     _workspace_array,
+    WebApiError,
 )
 
 
@@ -72,6 +76,34 @@ def test_parse_storage_usage() -> None:
     assert usage["limit"] == 5000000000
     assert usage["left"] == 4988831599
     assert usage["percent"] == 0
+
+
+def test_download_range_streams_only_requested_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeResponse:
+        status_code = 200
+
+        def iter_bytes(self):
+            yield b"ab"
+            yield b"cde"
+            yield b"fghijkl"
+
+    class FakeStream:
+        def __enter__(self):
+            return FakeResponse()
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr("tarklone.webapi.httpx.stream", lambda *a, **k: FakeStream())
+    web = object.__new__(TarkleWeb)
+    web.download_url = lambda *_args: "https://storage.example/signed"  # type: ignore[method-assign]
+    assert web.download_range({}, "ws", 2, 4) == b"cdef"
+
+
+def test_download_range_rejects_unbounded_requests() -> None:
+    web = object.__new__(TarkleWeb)
+    with pytest.raises(WebApiError, match="Download-Bereich"):
+        web.download_range({}, "ws", 0, 2 * 1024 * 1024)
 
 
 def test_item_type() -> None:

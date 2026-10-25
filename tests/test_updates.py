@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import pytest
 
 from tarklone.updates import (
+    UpdateInfo,
     UpdateError,
     _checksum_for,
     check_for_update,
@@ -10,6 +13,7 @@ from tarklone.updates import (
     parse_version,
     select_asset,
     select_checksum_asset,
+    download_update,
 )
 
 
@@ -36,15 +40,19 @@ def test_select_asset_per_platform() -> None:
 
 
 def test_checksum_parser() -> None:
-    text = "abc123  tarklone-1.1-windows-x64.exe\n"
-    assert _checksum_for(text, "tarklone-1.1-windows-x64.exe") == "abc123"
+    digest = "a" * 64
+    text = f"{digest}  tarklone-1.1-windows-x64.exe\n"
+    assert _checksum_for(text, "tarklone-1.1-windows-x64.exe") == digest
+    assert _checksum_for("abc123  app.exe", "app.exe") == ""
     assert _checksum_for(text, "other.exe") == ""
 
 
 class FakeResponse:
-    def __init__(self, status_code: int, payload=None):
+    def __init__(self, status_code: int, payload=None, *, text: str = "", url: str = ""):
         self.status_code = status_code
         self._payload = payload or {}
+        self.text = text
+        self.url = url or "https://api.github.com/repos/docbyte/tarklone/releases/latest"
 
     def json(self):
         return self._payload
@@ -59,11 +67,17 @@ def test_check_for_update(monkeypatch: pytest.MonkeyPatch) -> None:
         "assets": [
             {
                 "name": "tarklone-1.1-windows-x64.exe",
-                "browser_download_url": "https://example.invalid/app.exe",
+                "browser_download_url": (
+                    "https://github.com/docbyte/tarklone/releases/download/v1.1/"
+                    "tarklone-1.1-windows-x64.exe"
+                ),
             },
             {
                 "name": "SHA256SUMS-1.1.txt",
-                "browser_download_url": "https://example.invalid/sums.txt",
+                "browser_download_url": (
+                    "https://github.com/docbyte/tarklone/releases/download/v1.1/"
+                    "SHA256SUMS-1.1.txt"
+                ),
             },
         ],
     }
@@ -75,7 +89,7 @@ def test_check_for_update(monkeypatch: pytest.MonkeyPatch) -> None:
     assert info is not None
     assert info.version == "1.1"
     assert info.asset_name == "tarklone-1.1-windows-x64.exe"
-    assert info.checksum_url.endswith("sums.txt") or info.checksum_url.endswith("sums.txt")
+    assert info.checksum_url.endswith("SHA256SUMS-1.1.txt")
 
 
 def test_check_for_update_no_new_version(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -93,3 +107,75 @@ def test_check_for_update_private_or_missing(monkeypatch: pytest.MonkeyPatch) ->
     )
     with pytest.raises(UpdateError):
         check_for_update("1.0")
+
+
+def test_check_for_update_requires_checksum_asset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "tarklone.updates.httpx.get",
+        lambda *args, **kwargs: FakeResponse(
+            200,
+            {
+                "tag_name": "v1.2",
+                "assets": [
+                    {
+                        "name": "tarklone-1.2-windows-x64.exe",
+                        "browser_download_url": (
+                            "https://github.com/docbyte/tarklone/releases/download/"
+                            "v1.2/tarklone-1.2-windows-x64.exe"
+                        ),
+                    }
+                ],
+            },
+        ),
+    )
+    with pytest.raises(UpdateError, match="Prüfsummendatei"):
+        check_for_update("1.0")
+
+
+def test_update_download_fails_closed_on_bad_checksum(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    asset_name = "tarklone-1.2-windows-x64.exe"
+    url = (
+        "https://github.com/docbyte/tarklone/releases/download/"
+        f"v1.2/{asset_name}"
+    )
+    checksum_url = (
+        "https://github.com/docbyte/tarklone/releases/download/v1.2/SHA256SUMS-1.2.txt"
+    )
+
+    class AssetResponse:
+        status_code = 200
+        url = "https://release-assets.githubusercontent.com/download/asset"
+
+        @staticmethod
+        def iter_bytes(_chunk_size):
+            yield b"malicious or corrupted asset"
+
+    monkeypatch.setattr(
+        "tarklone.updates.httpx.get",
+        lambda *args, **kwargs: FakeResponse(
+            200,
+            text=f"{'0' * 64}  {asset_name}\n",
+            url=checksum_url,
+        ),
+    )
+    monkeypatch.setattr(
+        "tarklone.updates.httpx.stream",
+        lambda *args, **kwargs: nullcontext(AssetResponse()),
+    )
+    info = UpdateInfo(
+        version="1.2",
+        tag="v1.2",
+        name="tarklone 1.2",
+        html_url="https://github.com/docbyte/tarklone/releases/tag/v1.2",
+        asset_name=asset_name,
+        asset_url=url,
+        checksum_url=checksum_url,
+    )
+    with pytest.raises(UpdateError, match="Prüfsumme"):
+        download_update(info, tmp_path)
+    assert not (tmp_path / asset_name).exists()

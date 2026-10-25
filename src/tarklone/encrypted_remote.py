@@ -2,24 +2,109 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 from .crypto import (
     ENCRYPTED_DIR,
-    HEADER,
     HEADER_SIZE,
     KEYFILE_NAME,
-    MAGIC,
     TAG_SIZE,
     VERSION,
     CryptoError,
     EncryptionManager,
+    parse_file_header,
+    redact_encrypted_path,
 )
 from .sync import RemoteEntry, SyncError
+from .state import EntryState, SyncState
 from .tarkle import TarkleRemote
 
 logger = logging.getLogger("tarklone.crypto")
 REMOTE_KEYFILE = f"{ENCRYPTED_DIR}/{KEYFILE_NAME}"
+
+
+class EncryptedStateAdapter:
+    """Stores encrypted-folder paths as deterministic name tokens in SQLite."""
+
+    def __init__(self, state: SyncState, encryption: EncryptionManager):
+        self.state = state
+        self.encryption = encryption
+
+    def _stored_path(self, path: str) -> str:
+        if self.encryption.is_encrypted_path(path):
+            if not self.encryption.unlocked:
+                raise SyncError("Verschlüsselter Sync-Zustand ist gesperrt.")
+            return self.encryption.encrypt_path(path)
+        return path
+
+    def all(self) -> dict[str, EntryState]:
+        entries = self.state.all()
+        result: dict[str, EntryState] = {}
+        migrated = False
+        for stored_path, entry in entries.items():
+            if not self.encryption.is_encrypted_path(stored_path):
+                result[stored_path] = replace(entry, path=stored_path)
+                continue
+            try:
+                logical_path = self.encryption.decrypt_path(stored_path)
+            except CryptoError:
+                # Older versions stored plaintext names in SQLite. Replace
+                # those keys with the same deterministic tokens used remotely.
+                logical_path = stored_path
+                token_path = self.encryption.encrypt_path(logical_path)
+                existing = self.state.get(token_path)
+                if existing is None:
+                    self.state.upsert(replace(entry, path=token_path))
+                self.state.delete(stored_path)
+                migrated = True
+            result[logical_path] = replace(entry, path=logical_path)
+        if migrated:
+            self.state.compact_sensitive_pages()
+        return result
+
+    def get(self, path: str) -> EntryState | None:
+        stored_path = self._stored_path(path)
+        entry = self.state.get(stored_path)
+        if entry is None and stored_path != path:
+            # One-time compatibility for plaintext path rows from older builds.
+            legacy = self.state.get(path)
+            if legacy is not None:
+                self.state.upsert(replace(legacy, path=stored_path))
+                self.state.delete(path)
+                self.state.compact_sensitive_pages()
+                entry = legacy
+        return replace(entry, path=path) if entry is not None else None
+
+    def upsert(self, entry: EntryState) -> None:
+        self.state.upsert(replace(entry, path=self._stored_path(entry.path)))
+
+    def delete(self, path: str) -> None:
+        self.state.delete(self._stored_path(path))
+        if self.encryption.is_encrypted_path(path):
+            self.state.delete(path)
+
+    def delete_prefix(self, prefix: str) -> None:
+        normalized = prefix.replace("\\", "/").strip("/")
+        if normalized == ENCRYPTED_DIR or not self.encryption.is_encrypted_path(normalized):
+            self.state.delete_prefix(normalized)
+            return
+        for stored_path in self.state.all():
+            try:
+                logical_path = self.encryption.decrypt_path(stored_path)
+            except CryptoError:
+                logical_path = stored_path
+            if logical_path == normalized or logical_path.startswith(normalized + "/"):
+                self.state.delete(stored_path)
+
+    def get_meta(self, key: str, default: str = "") -> str:
+        return self.state.get_meta(key, default)
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.state.set_meta(key, value)
+
+    def close(self) -> None:
+        self.state.close()
 
 
 class EncryptionAdapter:
@@ -36,7 +121,7 @@ class EncryptionAdapter:
         self.supports_empty_folders = getattr(
             remote, "supports_empty_folders", True
         )
-        self._logical_sizes: dict[str, int] = {}
+        self._logical_sizes: dict[str, tuple[int, int, bytes]] = {}
         self._legacy_prefixes: set[str] = set()
 
     def close(self) -> None:
@@ -47,7 +132,7 @@ class EncryptionAdapter:
         temp_dir.mkdir(parents=True, exist_ok=True)
         return temp_dir / f"{name}.{uuid.uuid4().hex}.tmp"
 
-    def _logical_size(self, entry: RemoteEntry) -> int:
+    def _logical_size(self, entry: RemoteEntry) -> tuple[int, int, bytes]:
         cache_key = f"{entry.entry_id}:{entry.size}"
         cached = self._logical_sizes.get(cache_key)
         if cached is not None:
@@ -55,20 +140,26 @@ class EncryptionAdapter:
         header = self.remote.download_range(entry, 0, HEADER_SIZE)
         if len(header) != HEADER_SIZE:
             raise SyncError(
-                f"Verschlüsselte Datei hat keinen gültigen Header: {entry.path}"
+                "Verschlüsselte Datei hat keinen gültigen Header: "
+                f"{redact_encrypted_path(entry.path)}"
             )
-        magic, version, plain_size, _nonce = HEADER.unpack(header)
-        if magic != MAGIC or version != VERSION:
+        try:
+            version, plain_size, file_id, _nonce, header_size, _generation = (
+                parse_file_header(header)
+            )
+        except CryptoError as exc:
             raise SyncError(
-                f"Datei im encrypted-Ordner ist nicht tarklone-verschlüsselt: {entry.path}"
-            )
-        expected = HEADER_SIZE + plain_size + TAG_SIZE
+                "Datei im encrypted-Ordner ist nicht tarklone-verschlüsselt: "
+                f"{redact_encrypted_path(entry.path)}"
+            ) from exc
+        expected = header_size + plain_size + TAG_SIZE
         if entry.size and entry.size != expected:
             raise SyncError(
-                f"Verschlüsselte Datei hat eine unerwartete Größe: {entry.path}"
+                "Verschlüsselte Datei hat eine unerwartete Größe: "
+                f"{redact_encrypted_path(entry.path)}"
             )
-        self._logical_sizes[cache_key] = plain_size
-        return plain_size
+        self._logical_sizes[cache_key] = (plain_size, version, file_id)
+        return plain_size, version, file_id
 
     def _is_legacy(self, path: str) -> bool:
         return any(
@@ -107,7 +198,11 @@ class EncryptionAdapter:
             try:
                 token_path = self.encryption.encrypt_path(entry.path)
             except CryptoError as exc:
-                logger.warning("Namensmigration übersprungen (%s): %s", exc, entry.path)
+                logger.warning(
+                    "Namensmigration übersprungen (%s): %s",
+                    type(exc).__name__,
+                    redact_encrypted_path(entry.path),
+                )
                 continue
             if token_path in existing:
                 continue
@@ -117,9 +212,13 @@ class EncryptionAdapter:
                 self.remote.upload(temp, token_path)
                 self.remote.delete(entry)
                 existing.add(token_path)
-                logger.info("Name migriert: %s", entry.path)
-            except Exception:
-                logger.exception("Namensmigration fehlgeschlagen: %s", entry.path)
+                logger.info("Name migriert: %s", redact_encrypted_path(entry.path))
+            except Exception as exc:
+                logger.error(
+                    "Namensmigration fehlgeschlagen (%s): %s",
+                    type(exc).__name__,
+                    redact_encrypted_path(entry.path),
+                )
             finally:
                 temp.unlink(missing_ok=True)
 
@@ -138,21 +237,55 @@ class EncryptionAdapter:
                     continue
                 try:
                     self.remote.delete(entry)
-                    logger.info("Leeren Legacy-Ordner entfernt: %s", entry.path)
-                except Exception:
-                    logger.exception("Legacy-Ordner konnte nicht entfernt werden: %s", entry.path)
+                    logger.info(
+                        "Leeren Legacy-Ordner entfernt: %s",
+                        redact_encrypted_path(entry.path),
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Legacy-Ordner konnte nicht entfernt werden (%s): %s",
+                        type(exc).__name__,
+                        redact_encrypted_path(entry.path),
+                    )
         return self.remote.list_tree()
 
     def list_tree(self) -> list[RemoteEntry]:
         entries = self.remote.list_tree()
+        target_path = str(getattr(self.remote, "target_path", "") or "")
+        target_parts = target_path.replace("\\", "/").strip("/").split("/")
+        if (
+            self.encryption.enabled
+            and any(
+                part.casefold() == ENCRYPTED_DIR.casefold()
+                for part in target_parts
+                if part
+            )
+        ):
+            raise SyncError(
+                "Der Remote-Sync-Ordner darf nicht innerhalb des reservierten "
+                "Verschlüsselungsordners liegen. Sonst könnten normale Dateien "
+                "unverschlüsselt in encrypted/ landen."
+            )
+        has_mis_cased_root = any(
+            entry.path.split("/", 1)[0].casefold() == ENCRYPTED_DIR.casefold()
+            and entry.path.split("/", 1)[0] != ENCRYPTED_DIR
+            for entry in entries
+        )
+        has_keyfile = any(
+            entry.path.casefold() == REMOTE_KEYFILE.casefold()
+            and entry.kind == "file"
+            for entry in entries
+        )
+        if has_mis_cased_root and (self.encryption.enabled or has_keyfile):
+            raise SyncError(
+                "Der Remote-Verschlüsselungsordner muss exakt 'encrypted' heißen. "
+                "Der Sync wurde abgebrochen, damit keine Ciphertexte als Klartext "
+                "behandelt werden."
+            )
         if not self.encryption.enabled:
             # Auf einem neuen Rechner kann die Schlüsseldatei remote vorhanden
             # sein. Dann nur diese und normale Dateien übertragen, aber keine
             # Ciphertext-Dateien als Klartext herunterladen.
-            has_keyfile = any(
-                entry.path == REMOTE_KEYFILE and entry.kind == "file"
-                for entry in entries
-            )
             if not has_keyfile:
                 return entries
             return [
@@ -180,17 +313,24 @@ class EncryptionAdapter:
                 plain_path = remote_path
                 self._legacy_prefixes.add(remote_path)
                 logger.warning(
-                    "Klartextname im encrypted-Ordner (Legacy): %s", remote_path
+                    "Klartextname im encrypted-Ordner (Legacy): %s",
+                    redact_encrypted_path(remote_path),
                 )
             entry.remote_path = remote_path
             if entry.kind == "file" and self.encryption.unlocked:
                 # Der logische Größenheader wird über die Remote-ID gelesen;
                 # entry.remote_path ist der echte Remote-Pfad.
-                entry.logical_size = self._logical_size(entry)
+                entry.logical_size, content_version, file_id = self._logical_size(entry)
+                entry.needs_reencrypt = content_version != VERSION
+                if content_version == VERSION and len(file_id) == 16:
+                    entry.crypto_generation = int.from_bytes(file_id[:8], "big")
+                    entry.content_hash = (
+                        f"tarklone-v2:{entry.crypto_generation}:{file_id[8:].hex()}"
+                    )
             elif entry.kind == "file":
                 logger.warning(
                     "Überspringe verschlüsselte Datei (Verschlüsselung gesperrt): %s",
-                    plain_path,
+                    redact_encrypted_path(plain_path),
                 )
                 continue
             entry.path = plain_path
@@ -213,7 +353,11 @@ class EncryptionAdapter:
         temp = self._temp_path(destination.name)
         try:
             self.remote.download(entry, temp)
-            self.encryption.decrypt_file(temp, destination)
+            self.encryption.decrypt_file(
+                temp,
+                destination,
+                logical_path=entry.path,
+            )
         finally:
             temp.unlink(missing_ok=True)
 
@@ -224,6 +368,7 @@ class EncryptionAdapter:
         *,
         mtime: float | None = None,
         remote_entry: RemoteEntry | None = None,
+        crypto_generation: int = 1,
     ) -> RemoteEntry | None:
         if self.encryption.is_encrypted_path(remote_path) and not self.encryption.enabled:
             raise SyncError(
@@ -248,7 +393,19 @@ class EncryptionAdapter:
             token_path = self.encryption.encrypt_path(remote_path)
         temp = self._temp_path(local_path.name)
         try:
-            self.encryption.encrypt_file(local_path, temp)
+            self.encryption.encrypt_file(
+                local_path,
+                temp,
+                logical_path=remote_path,
+                generation=crypto_generation,
+            )
+            with temp.open("rb") as encrypted_file:
+                header = encrypted_file.read(HEADER_SIZE)
+            version, _size, file_id, _nonce, _header_size, generation = (
+                parse_file_header(header)
+            )
+            if version != VERSION or len(file_id) != 16:
+                raise SyncError("Neu verschlüsselter Inhalt hat ein ungültiges Format.")
             cipher_size = temp.stat().st_size
             uploaded = self.remote.upload(
                 temp,
@@ -268,6 +425,8 @@ class EncryptionAdapter:
             entry_id=uploaded.entry_id,
             parent_id=uploaded.parent_id,
             logical_size=plain_size,
+            content_hash=f"tarklone-v2:{generation}:{file_id[8:].hex()}",
+            crypto_generation=generation,
         )
 
     def delete(self, entry: RemoteEntry) -> None:

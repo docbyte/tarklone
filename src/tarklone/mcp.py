@@ -5,6 +5,8 @@ from typing import Any
 
 import httpx
 
+from .config import validate_mcp_url
+
 PROTOCOL_VERSION = "2025-06-18"
 
 
@@ -25,7 +27,7 @@ class McpClient:
         client_version: str = "0.1.0",
         http: httpx.Client | None = None,
     ):
-        self.url = url
+        self.url = validate_mcp_url(url)
         self.access_token = access_token
         self.client_name = client_name
         self.client_version = client_version

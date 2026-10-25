@@ -9,6 +9,8 @@ from tarklone.config import (
     load_settings,
     profile_state_path,
     save_settings,
+    validate_mcp_url,
+    validate_server_url,
 )
 from tarklone.state import EntryState, SyncState
 
@@ -99,6 +101,36 @@ def test_profile_paths_are_stable_and_safe() -> None:
     assert first.startswith("crypto-master-ws-1-")
     assert first != second
     assert first == crypto_keyring_username("ws-1", "C:/sync/a")
+
+
+def test_service_endpoints_reject_untrusted_origins() -> None:
+    assert validate_server_url("https://tarkle.com/") == "https://tarkle.com/"
+    assert validate_mcp_url("https://mcp.tarklesend.com/mcp") == (
+        "https://mcp.tarklesend.com/mcp"
+    )
+    for endpoint in (
+        "http://tarkle.com",
+        "https://attacker.example",
+        "https://user:pass@tarkle.com",
+        "https://tarkle.com:444",
+    ):
+        try:
+            validate_server_url(endpoint)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"endpoint should be rejected: {endpoint}")
+    for endpoint in (
+        "http://mcp.tarklesend.com/mcp",
+        "https://attacker.example/mcp",
+        "https://mcp.tarklesend.com/other",
+    ):
+        try:
+            validate_mcp_url(endpoint)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"endpoint should be rejected: {endpoint}")
 
 
 def test_settings_ignores_unknown_fields(tmp_path: Path) -> None:

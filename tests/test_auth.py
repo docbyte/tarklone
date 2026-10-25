@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import threading
 import urllib.error
 import urllib.request
@@ -10,7 +11,7 @@ from urllib.parse import urlparse
 import keyring
 import pytest
 
-from tarklone.auth import Token, TokenStore, _CallbackServer, jwt_claims
+from tarklone.auth import OAuthClient, Token, TokenStore, _CallbackServer, jwt_claims
 from tarklone.config import Settings
 
 
@@ -65,6 +66,11 @@ def test_token_store_roundtrip(
     tmp_path,
 ) -> None:
     values: dict[tuple[str, str], str] = {}
+    monkeypatch.setattr(
+        keyring,
+        "get_keyring",
+        lambda: type("TestKeyring", (), {"priority": 1})(),
+    )
 
     def set_password(service: str, username: str, value: str) -> None:
         values[(service, username)] = value
@@ -113,11 +119,42 @@ def test_token_store_fallback_without_keyring(
     token = Token(access_token="access", refresh_token="refresh", email="a@example.com")
     store.save(token)
     assert fallback.is_file()
+    if os.name == "nt":
+        assert b"access" not in fallback.read_bytes()
+    else:
+        assert fallback.stat().st_mode & 0o777 == 0o600
     loaded = store.load()
     assert loaded is not None
     assert loaded.access_token == "access"
-    store.delete()
+    assert store.delete() is False
     assert not fallback.exists()
+
+
+def test_token_store_delete_reports_persistent_keyring_value(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    values: dict[tuple[str, str], str] = {}
+    monkeypatch.setattr(
+        keyring,
+        "get_keyring",
+        lambda: type("TestKeyring", (), {"priority": 1})(),
+    )
+    monkeypatch.setattr(
+        keyring,
+        "set_password",
+        lambda service, username, value: values.__setitem__((service, username), value),
+    )
+    monkeypatch.setattr(
+        keyring,
+        "get_password",
+        lambda service, username: values.get((service, username)),
+    )
+    monkeypatch.setattr(keyring, "delete_password", lambda *_args: None)
+    store = TokenStore(fallback_path=tmp_path / "token.json")
+    store.save(Token(access_token="access", refresh_token="refresh"))
+    assert store.delete() is False
+    assert store.load() is not None
 
 
 def test_token_from_payload() -> None:
@@ -140,6 +177,46 @@ def test_token_from_payload() -> None:
     assert token.email == "a@example.com"
     assert token.refresh_token == "refresh"
     assert token.expires_in > 3000
+
+
+def test_logout_revokes_local_server_session_and_clears_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = Token(access_token="access", refresh_token="refresh")
+
+    class Store:
+        def __init__(self) -> None:
+            self.deleted = False
+
+        def load(self):
+            return token
+
+        def delete(self):
+            self.deleted = True
+            return True
+
+    class Http:
+        def __init__(self) -> None:
+            self.request = None
+
+        def post(self, url, *, headers):
+            self.request = (url, headers)
+            return type("Response", (), {"status_code": 204})()
+
+        def close(self):
+            pass
+
+    store = Store()
+    http = Http()
+    monkeypatch.setattr("tarklone.auth.save_settings", lambda _settings: None)
+    client = OAuthClient(Settings(), http=http, token_store=store)
+    try:
+        assert client.logout() == (True, True)
+    finally:
+        client.close()
+    assert store.deleted
+    assert http.request[0].endswith("/logout?scope=local")
+    assert http.request[1]["Authorization"] == "Bearer access"
 
 
 def test_callback_url_is_localhost_only() -> None:

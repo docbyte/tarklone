@@ -32,7 +32,7 @@ from .config import (
     state_path,
 )
 from .crypto import KEYFILE_NAME, EncryptionManager
-from .encrypted_remote import EncryptionAdapter
+from .encrypted_remote import EncryptedStateAdapter, EncryptionAdapter
 from .state import SyncState
 from .sync import RemoteUnsupported, SyncBusy, SyncEngine, SyncError, SyncProgress
 from .ui import SetupDialog
@@ -579,6 +579,17 @@ class TarkloneApp:
         try:
             from .tarkle import TarkleRemote
 
+            manager = EncryptionManager(
+                Path(profile.local_folder),
+                keyring_username=crypto_keyring_username(
+                    profile.id, profile.local_folder
+                ),
+            )
+            if not manager.clear_cached_key():
+                return False, (
+                    "Der Schlüssel konnte nicht aus dem System-Keyring entfernt "
+                    "werden. Es wurden keine Remote-Dateien gelöscht."
+                )
             profile_settings = replace(
                 self.settings,
                 local_folder=profile.local_folder,
@@ -613,11 +624,7 @@ class TarkloneApp:
                 remote.close()
             state = self._state_for(profile)
             state.delete_prefix("encrypted")
-            manager = EncryptionManager(
-                Path(profile.local_folder),
-                keyring_username=crypto_keyring_username(profile.id, profile.local_folder),
-            )
-            manager.reset_key()
+            manager.reset_key(cache_already_cleared=True)
             logger.warning(
                 "Verschlüsselungsschlüssel und Remote-Daten für %s zurückgesetzt",
                 profile.display_name,
@@ -751,10 +758,15 @@ class TarkloneApp:
             remote = TarkleRemote(profile_settings, token)
             adapter = EncryptionAdapter(remote, encryption)
             state = self._state_for(profile)
+            sync_state = (
+                EncryptedStateAdapter(state, encryption)
+                if encryption.enabled
+                else state
+            )
             engine = SyncEngine(
                 local_root,
                 adapter,
-                state,
+                sync_state,
                 sync_deletions=profile.sync_deletions,
                 conflict_policy=self.settings.conflict_policy,
                 exclude=self.settings.exclude,

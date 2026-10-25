@@ -5,6 +5,7 @@ import json
 import mimetypes
 import os
 import re
+import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -14,7 +15,7 @@ from urllib.parse import urlencode
 import httpx
 
 from .auth import ANON_KEY, SUPABASE_URL, Token, jwt_claims
-from .config import Settings
+from .config import Settings, validate_server_url
 
 
 class WebApiError(RuntimeError):
@@ -144,8 +145,9 @@ class TarkleWeb:
     ):
         self.settings = settings
         self.token = token
+        self.server_url = validate_server_url(settings.server_url)
         self.http = http or httpx.Client(
-            base_url=settings.server_url.rstrip("/"),
+            base_url=self.server_url.rstrip("/"),
             timeout=60.0,
             follow_redirects=False,
         )
@@ -381,12 +383,13 @@ class TarkleWeb:
         length: int,
     ) -> bytes:
         """Liest einen Bytebereich einer Remote-Datei (für den Crypto-Header)."""
-        if start < 0 or length <= 0:
+        if start < 0 or length <= 0 or length > 1024 * 1024:
             raise WebApiError("Ungültiger Download-Bereich.")
         url = self.download_url(item, workspace_id)
         end = start + length - 1
         try:
-            response = httpx.get(
+            response_context = httpx.stream(
+                "GET",
                 url,
                 headers={"Range": f"bytes={start}-{end}"},
                 timeout=30.0,
@@ -394,14 +397,30 @@ class TarkleWeb:
             )
         except httpx.HTTPError as exc:
             raise WebApiError(f"Range-Download fehlgeschlagen: {exc}") from exc
-        if response.status_code == 206:
-            return response.content
-        if response.status_code == 200:
-            # Storage hat Range ignoriert; der Header ist trotzdem enthalten.
-            return response.content[start : end + 1]
-        raise WebApiError(
-            f"Range-Download fehlgeschlagen: HTTP {response.status_code}"
-        )
+        try:
+            with response_context as response:
+                if response.status_code not in (200, 206):
+                    raise WebApiError(
+                        f"Range-Download fehlgeschlagen: HTTP {response.status_code}"
+                    )
+                wanted_start = 0 if response.status_code == 206 else start
+                wanted_end = length if response.status_code == 206 else start + length
+                position = 0
+                result = bytearray()
+                for chunk in response.iter_bytes():
+                    chunk_end = position + len(chunk)
+                    if chunk_end > wanted_start and position < wanted_end:
+                        left = max(0, wanted_start - position)
+                        right = min(len(chunk), wanted_end - position)
+                        result.extend(chunk[left:right])
+                        if len(result) >= length:
+                            break
+                    position = chunk_end
+                if len(result) != length:
+                    raise WebApiError("Range-Download lieferte nicht genug Bytes.")
+                return bytes(result)
+        except httpx.HTTPError as exc:
+            raise WebApiError(f"Range-Download fehlgeschlagen: {exc}") from exc
 
     def download_to(
         self,
@@ -411,12 +430,18 @@ class TarkleWeb:
     ) -> None:
         url = self.download_url(item, workspace_id)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        temp = destination.with_name(destination.name + ".tarklone-part")
+        fd, temp_name = tempfile.mkstemp(
+            prefix=".tarklone-download-",
+            suffix=".part",
+            dir=destination.parent,
+        )
+        temp = Path(temp_name)
         try:
             with httpx.stream("GET", url, timeout=120.0, follow_redirects=True) as response:
                 if response.status_code >= 400:
                     raise WebApiError(f"Download fehlgeschlagen: HTTP {response.status_code}")
-                with temp.open("wb") as handle:
+                with os.fdopen(fd, "wb") as handle:
+                    fd = -1
                     for chunk in response.iter_bytes(1024 * 1024):
                         handle.write(chunk)
             expected = item.get("size")
@@ -428,6 +453,8 @@ class TarkleWeb:
                     )
             os.replace(temp, destination)
         finally:
+            if fd >= 0:
+                os.close(fd)
             temp.unlink(missing_ok=True)
 
     def upload_file(

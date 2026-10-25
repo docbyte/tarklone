@@ -73,8 +73,8 @@ app = BUNDLE(
     icon=str(ROOT / "assets" / "tarklone.icns"),
     bundle_identifier="com.docbyte.tarklone",
     info_plist={
-        "CFBundleShortVersionString": "1.2.1",
-        "CFBundleVersion": "1.2.1.0",
+        "CFBundleShortVersionString": "1.3",
+        "CFBundleVersion": "1.3.0.0",
         "NSHighResolutionCapable": True,
         "LSUIElement": True,
     },

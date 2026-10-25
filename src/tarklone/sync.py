@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import socket
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Protocol
 
 from .state import EntryState, SyncState
+from .crypto import redact_encrypted_path
 
 
 class SyncError(RuntimeError):
@@ -44,6 +46,10 @@ class RemoteEntry:
     # bleibt die Größe des tatsächlich übertragenen Blobs (Ciphertext).
     # None bedeutet: keine abweichende logische Größe vorhanden.
     logical_size: int | None = None
+    # Ältere verschlüsselte Inhalte werden bei bestehender lokaler Kopie
+    # automatisch mit dem aktuellen, pfadgebundenen Format neu hochgeladen.
+    needs_reencrypt: bool = False
+    crypto_generation: int = 0
 
 
 @dataclass
@@ -72,6 +78,7 @@ class RemoteAdapter(Protocol):
         *,
         mtime: float | None = None,
         remote_entry: RemoteEntry | None = None,
+        crypto_generation: int = 0,
     ) -> RemoteEntry | None: ...
 
     def delete(self, entry: RemoteEntry) -> None: ...
@@ -193,7 +200,7 @@ class LocalScanner:
                 try:
                     stat = absolute.stat()
                 except OSError as exc:
-                    errors.append(f"{rel}: {exc}")
+                    errors.append(f"{redact_encrypted_path(rel)}: {type(exc).__name__}")
                     continue
                 entries[rel] = LocalEntry(
                     path=rel,
@@ -214,7 +221,7 @@ class LocalScanner:
                 try:
                     stat = absolute.stat()
                 except OSError as exc:
-                    errors.append(f"{rel}: {exc}")
+                    errors.append(f"{redact_encrypted_path(rel)}: {type(exc).__name__}")
                     continue
                 if not absolute.is_file():
                     continue
@@ -266,6 +273,14 @@ class SyncEngine:
                 self.progress(message)
             except Exception:
                 pass
+
+    @staticmethod
+    def _log_path(path: str) -> str:
+        return redact_encrypted_path(path)
+
+    @classmethod
+    def _action_message(cls, action: Action, prefix: str) -> str:
+        return f"{prefix}: {cls._log_path(action.path)}"
 
     def _check_cancel(self) -> None:
         if self.cancel_event.is_set():
@@ -349,7 +364,8 @@ class SyncEngine:
             self._check_cancel()
             local = local_map.get(path)
             remote = remote_map.get(path)
-            previous = None if full else state_map.get(path)
+            trusted_previous = state_map.get(path)
+            previous = None if full else trusted_previous
 
             if local and remote and local.kind != remote.kind:
                 actions.append(
@@ -357,6 +373,51 @@ class SyncEngine:
                         "conflict",
                         path,
                         "Datei/Ordner-Typ unterscheidet sich",
+                        local,
+                        remote,
+                    )
+                )
+                continue
+
+            if (
+                local
+                and remote
+                and remote.kind == "file"
+                and remote.crypto_generation > 0
+                and trusted_previous is not None
+            ):
+                previous_generation = self._crypto_generation(
+                    trusted_previous.remote_hash
+                )
+                if previous_generation > remote.crypto_generation or (
+                    previous_generation == remote.crypto_generation
+                    and trusted_previous.remote_hash
+                    and remote.content_hash
+                    and trusted_previous.remote_hash != remote.content_hash
+                ):
+                    actions.append(
+                        Action(
+                            "rollback",
+                            path,
+                            "verschlüsselte Remote-Revision ist älter oder widersprüchlich",
+                            local,
+                            remote,
+                        )
+                    )
+                    continue
+
+            if (
+                local
+                and remote
+                and local.kind == "file"
+                and remote.kind == "file"
+                and remote.needs_reencrypt
+            ):
+                actions.append(
+                    Action(
+                        "upload",
+                        path,
+                        "Verschlüsselungsformat aktualisieren",
                         local,
                         remote,
                     )
@@ -404,6 +465,10 @@ class SyncEngine:
                 remote_changed = (
                     remote.entry_id != previous.remote_id
                     or remote.size != previous.remote_size
+                    or (
+                        remote.content_hash
+                        and remote.content_hash != previous.remote_hash
+                    )
                     or (
                         remote.mtime
                         and previous.remote_mtime
@@ -494,6 +559,15 @@ class SyncEngine:
             state.remote_hash = remote.content_hash
         self.state.upsert(state)
 
+    @staticmethod
+    def _crypto_generation(identity: str) -> int:
+        if not identity.startswith("tarklone-v2:"):
+            return 0
+        try:
+            return int(identity.split(":", 2)[1])
+        except (IndexError, ValueError):
+            return 0
+
     def _upload(self, action: Action) -> None:
         local = action.local
         assert local is not None
@@ -502,6 +576,13 @@ class SyncEngine:
             action.path,
             mtime=local.mtime,
             remote_entry=action.remote,
+            crypto_generation=max(
+                self._crypto_generation(
+                    (self.state.get(action.path) or EntryState(path=action.path)).remote_hash
+                ),
+                action.remote.crypto_generation if action.remote else 0,
+            )
+            + 1,
         )
         if remote is None:
             remote = RemoteEntry(path=action.path, size=local.size, mtime=local.mtime)
@@ -511,7 +592,18 @@ class SyncEngine:
     def _download(self, remote: RemoteEntry) -> None:
         destination = self._safe_destination(remote.path)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        temp = destination.with_name(destination.name + ".tarklone-part")
+        temp_dir = self.local_root / ".tarklone" / "tmp"
+        temp_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name != "nt":
+            try:
+                temp_dir.chmod(0o700)
+            except OSError:
+                pass
+        fd, temp_name = tempfile.mkstemp(
+            prefix=".tarklone-download-", suffix=".part", dir=temp_dir
+        )
+        os.close(fd)
+        temp = Path(temp_name)
         try:
             self.adapter.download(remote, temp)
             os.replace(temp, destination)
@@ -554,7 +646,10 @@ class SyncEngine:
         if uploaded is None:
             uploaded = RemoteEntry(path=conflict_rel, size=conflict_local.size)
         self._record(conflict_rel, "file", conflict_local, uploaded)
-        self._emit(f"Konflikt: {action.path} → {conflict_rel}")
+        self._emit(
+            f"Konflikt: {self._log_path(action.path)} → "
+            f"{self._log_path(conflict_rel)}"
+        )
 
     def _execute(self, action: Action, result: SyncResult, dry_run: bool) -> None:
         self._check_cancel()
@@ -577,7 +672,10 @@ class SyncEngine:
             result.skipped += 1
             return
         if dry_run:
-            self._emit(f"[dry-run] {action.kind}: {action.path} ({action.reason})")
+            self._emit(
+                f"[dry-run] {action.kind}: {self._log_path(action.path)} "
+                f"({action.reason})"
+            )
             return
 
         if action.kind == "record":
@@ -588,22 +686,34 @@ class SyncEngine:
             result.skipped += 1
             return
 
+        if action.kind == "rollback":
+            self.logger.error(
+                "Verschlüsselte Remote-Revision für %s ist rückläufig oder "
+                "widersprüchlich; lokale Fassung bleibt unverändert.",
+                self._log_path(action.path),
+            )
+            result.errors.append(
+                f"{self._log_path(action.path)}: verschlüsselte Remote-Revision "
+                "ist rückläufig oder widersprüchlich"
+            )
+            return
+
         if action.kind == "upload":
-            self._emit(f"Upload: {action.path}")
+            self._emit(self._action_message(action, "Upload"))
             self._upload(action)
             result.uploaded += 1
             return
 
         if action.kind == "download":
             assert action.remote
-            self._emit(f"Download: {action.path}")
+            self._emit(self._action_message(action, "Download"))
             self._download(action.remote)
             result.downloaded += 1
             return
 
         if action.kind == "delete_local":
             assert action.local
-            self._emit(f"Lokal löschen (Papierkorb): {action.path}")
+            self._emit(self._action_message(action, "Lokal löschen (Papierkorb)"))
             self._move_to_trash(action.local)
             self.state.delete(action.path)
             result.deleted_local += 1
@@ -611,7 +721,7 @@ class SyncEngine:
 
         if action.kind == "delete_remote":
             assert action.remote
-            self._emit(f"Remote löschen: {action.path}")
+            self._emit(self._action_message(action, "Remote löschen"))
             self.adapter.delete(action.remote)
             self.state.delete(action.path)
             result.deleted_remote += 1
@@ -619,7 +729,7 @@ class SyncEngine:
 
         if action.kind == "mkdir_local":
             assert action.remote
-            self._emit(f"Ordner anlegen: {action.path}")
+            self._emit(self._action_message(action, "Ordner anlegen"))
             destination = self._safe_destination(action.path)
             destination.mkdir(parents=True, exist_ok=True)
             stat = destination.stat()
@@ -634,7 +744,7 @@ class SyncEngine:
             return
 
         if action.kind == "mkdir_remote":
-            self._emit(f"Remote-Ordner anlegen: {action.path}")
+            self._emit(self._action_message(action, "Remote-Ordner anlegen"))
             remote = self.adapter.create_folder(action.path)
             if remote is None:
                 remote = RemoteEntry(path=action.path, kind="dir")
@@ -644,7 +754,9 @@ class SyncEngine:
 
         if action.kind == "conflict":
             assert action.local and action.remote
-            self._emit(f"Konflikt: {action.path} ({action.reason})")
+            self._emit(
+                f"Konflikt: {self._log_path(action.path)} ({action.reason})"
+            )
             self._resolve_conflict(action)
             result.conflicts += 1
             return
@@ -659,6 +771,17 @@ class SyncEngine:
             self._emit("Scanne lokalen Ordner …")
             local_map, scan_errors = self.scanner.scan()
             result.errors.extend(scan_errors)
+            encryption = getattr(self.adapter, "encryption", None)
+            if encryption is not None and encryption.enabled:
+                if any(
+                    path.split("/", 1)[0].casefold() == "encrypted"
+                    and path.split("/", 1)[0] != "encrypted"
+                    for path in local_map
+                ):
+                    raise SyncError(
+                        "Der Verschlüsselungsordner muss exakt 'encrypted' heißen. "
+                        "Der Sync wurde abgebrochen, um keinen Klartext hochzuladen."
+                    )
 
             self._emit("Lade Remote-Dateiliste …")
             remote_entries = self.adapter.list_tree()
@@ -690,15 +813,32 @@ class SyncEngine:
                 try:
                     self._execute(action, result, dry_run)
                 except RemoteUnsupported as exc:
-                    result.errors.append(f"{action.path}: {exc}")
+                    result.errors.append(
+                        f"{self._log_path(action.path)}: {type(exc).__name__}"
+                        if self._log_path(action.path) != action.path
+                        else f"{action.path}: {exc}"
+                    )
                 except SyncError:
                     raise
                 except Exception as exc:  # noqa: BLE001 - pro Datei weiterarbeiten
-                    self.logger.exception("Sync-Aktion fehlgeschlagen: %s", action.path)
-                    result.errors.append(f"{action.path}: {exc}")
+                    if self._log_path(action.path) != action.path:
+                        self.logger.error(
+                            "Sync-Aktion im encrypted-Ordner fehlgeschlagen (%s)",
+                            type(exc).__name__,
+                        )
+                        result.errors.append(
+                            f"{self._log_path(action.path)}: {type(exc).__name__}"
+                        )
+                    else:
+                        self.logger.exception(
+                            "Sync-Aktion fehlgeschlagen: %s", action.path
+                        )
+                        result.errors.append(f"{action.path}: {exc}")
                 if action.kind not in {"skip", "record"}:
                     completed += 1
-                    self._emit_progress(completed, total, started, action.path)
+                    self._emit_progress(
+                        completed, total, started, self._log_path(action.path)
+                    )
 
             self._emit_progress(total, total, started, "Fertig")
             result.finished_at = time.time()

@@ -78,6 +78,7 @@ class WorkspaceTab(tk.Frame):
         super().__init__(master, bg=BACKGROUND)
         self.dialog = dialog
         self.profile = profile
+        self._allow_existing_after_reset = False
         self.local_var = tk.StringVar(value=profile.local_folder)
         self.folder_var = tk.StringVar(value=profile.remote_folder_id)
         self.interval_var = tk.IntVar(value=profile.sync_interval_seconds)
@@ -348,7 +349,7 @@ class WorkspaceTab(tk.Frame):
     def _set_encryption_password(self, manager: EncryptionManager) -> None:
         new = simpledialog.askstring(
             "Passwort festlegen",
-            "Neues Passwort (mindestens 8 Zeichen):",
+            "Neues Passwort (mindestens 12 Zeichen; am besten eine lange Passphrase):",
             show="*",
             parent=self,
         )
@@ -368,10 +369,14 @@ class WorkspaceTab(tk.Frame):
             )
             return
         try:
-            manager.set_password(new)
+            manager.set_password(
+                new,
+                allow_existing=self._allow_existing_after_reset,
+            )
         except CryptoError as exc:
             messagebox.showerror("Verschlüsselung", str(exc), parent=self)
             return
+        self._allow_existing_after_reset = False
         messagebox.showinfo(
             "Verschlüsselung",
             "Verschlüsselung eingerichtet.",
@@ -409,7 +414,7 @@ class WorkspaceTab(tk.Frame):
             return
         new = simpledialog.askstring(
             "Passwort ändern",
-            "Neues Passwort (mindestens 8 Zeichen):",
+            "Neues Passwort (mindestens 12 Zeichen; am besten eine lange Passphrase):",
             show="*",
             parent=self,
         )
@@ -442,7 +447,17 @@ class WorkspaceTab(tk.Frame):
         manager = self._manager()
         if manager is None or not manager.unlocked:
             return
-        manager.lock(clear_cache=True)
+        cleared = manager.lock(clear_cache=True)
+        if not cleared:
+            messagebox.showwarning(
+                "Verschlüsselung",
+                "Der Schlüssel wurde aus dem Arbeitsspeicher entfernt, aber der "
+                "System-Keyring konnte nicht zuverlässig geleert werden. Prüfe den "
+                "Keyring, bevor du das Gerät weitergibst.",
+                parent=self,
+            )
+            self.refresh_encryption()
+            return
         messagebox.showinfo(
             "Verschlüsselung",
             "Verschlüsselung gesperrt.",
@@ -501,6 +516,7 @@ class WorkspaceTab(tk.Frame):
         self.danger_button.config(state="normal", text="Schlüssel löschen …")
         self.refresh_encryption()
         if ok:
+            self._allow_existing_after_reset = True
             messagebox.showinfo(
                 "Verschlüsselung zurückgesetzt",
                 message,
@@ -1200,10 +1216,28 @@ class SetupDialog(tk.Toplevel):
             parent=self,
         ):
             return
-        OAuthClient(self.settings).logout()
+        client = OAuthClient(self.settings)
+        try:
+            local_deleted, remote_revoked = client.logout()
+        finally:
+            client.close()
         self._workspaces_by_id.clear()
         self._workspace_load_attempted = False
         self._refresh_login_state()
+        if not local_deleted:
+            messagebox.showerror(
+                "Abmelden",
+                "Der lokale Token konnte nicht zuverlässig aus dem System-Keyring "
+                "entfernt werden. Bitte Credential Manager/Keyring prüfen.",
+                parent=self,
+            )
+        elif not remote_revoked:
+            messagebox.showwarning(
+                "Abmelden",
+                "Der lokale Token wurde entfernt, aber Tarkle konnte die Sitzung "
+                "nicht widerrufen. Bitte erneut anmelden, wenn du wieder synchronisieren möchtest.",
+                parent=self,
+            )
 
     # --- Speichern -------------------------------------------------------
 

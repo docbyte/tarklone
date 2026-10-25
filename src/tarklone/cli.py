@@ -57,8 +57,26 @@ def cmd_login(args: argparse.Namespace) -> int:
 
 def cmd_logout(_args: argparse.Namespace) -> int:
     settings = load_settings()
-    OAuthClient(settings).logout()
-    print("Tarkle-Login wurde entfernt.")
+    client = OAuthClient(settings)
+    try:
+        local_deleted, remote_revoked = client.logout()
+    finally:
+        client.close()
+    if not local_deleted:
+        print(
+            "Fehler: Lokale Zugangsdaten konnten nicht zuverlässig aus dem "
+            "Keyring entfernt werden.",
+            file=sys.stderr,
+        )
+        return 1
+    if not remote_revoked:
+        print(
+            "Lokale Zugangsdaten wurden entfernt; Tarkle konnte die Sitzung "
+            "jedoch nicht widerrufen.",
+            file=sys.stderr,
+        )
+        return 1
+    print("Tarkle-Sitzung widerrufen und lokale Zugangsdaten entfernt.")
     return 0
 
 
@@ -224,7 +242,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
     import getpass
 
     from .crypto import CryptoError, EncryptionManager
-    from .encrypted_remote import EncryptionAdapter
+    from .encrypted_remote import EncryptedStateAdapter, EncryptionAdapter
     from .state import SyncState
     from .sync import SyncEngine, SyncError
     from .tarkle import TarkleRemote
@@ -351,10 +369,15 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     state_file.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(state_path(), state_file)
                 state = SyncState(state_file)
+                sync_state = (
+                    EncryptedStateAdapter(state, encryption)
+                    if encryption.enabled
+                    else state
+                )
                 engine = SyncEngine(
                     Path(profile.local_folder),
                     adapter,
-                    state,
+                    sync_state,
                     sync_deletions=profile.sync_deletions,
                     conflict_policy=settings.conflict_policy,
                     exclude=settings.exclude,

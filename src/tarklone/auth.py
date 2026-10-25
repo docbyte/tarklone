@@ -3,8 +3,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import secrets
+import stat
+import tempfile
 import threading
 import time
 import webbrowser
@@ -24,6 +27,7 @@ REGISTER_URL = f"{AUTH_BASE}/oauth/clients/register"
 AUTHORIZE_URL = f"{AUTH_BASE}/oauth/authorize"
 TOKEN_URL = f"{AUTH_BASE}/oauth/token"
 USERINFO_URL = f"{AUTH_BASE}/oauth/userinfo"
+LOGOUT_URL = f"{AUTH_BASE}/logout?scope=local"
 
 # Öffentlicher Supabase-Anon-Key der Tarkle-Web-App. Kein Geheimnis.
 ANON_KEY = (
@@ -35,6 +39,8 @@ ANON_KEY = (
 SERVICE_NAME = "tarklone"
 TOKEN_USERNAME = "oauth"
 OAUTH_SCOPE = "email profile offline_access"
+_DPAPI_PREFIX = b"TARKLONE-DPAPI1:"
+logger = logging.getLogger("tarklone.auth")
 
 
 class AuthError(RuntimeError):
@@ -110,11 +116,11 @@ def _email_from_tokens(*tokens: str) -> str:
 
 
 class TokenStore:
-    """Speichert den OAuth-Token im Keyring, sonst in einer 0600-Datei.
+    """Speichert Tokens im OS-Keyring, mit einem geschützten Dateifallback.
 
     Der Datei-Fallback ist für headless Linux-/WSL-Systeme ohne
-    SecretService/Keyring gedacht. Auf Windows/macOS wird normalerweise der
-    jeweilige Keyring verwendet.
+    SecretService/Keyring gedacht. Auf Windows wird der Fallback zusätzlich
+    mit DPAPI an das aktuelle Benutzerkonto gebunden.
     """
 
     def __init__(
@@ -138,6 +144,107 @@ class TokenStore:
             return None
         return Token.from_dict(data)
 
+    @staticmethod
+    def _dpapi(data: bytes, *, decrypt: bool) -> bytes:
+        if os.name != "nt":
+            raise TokenStoreError("DPAPI ist nur unter Windows verfügbar.")
+        import ctypes
+        from ctypes import wintypes
+
+        class DataBlob(ctypes.Structure):
+            _fields_ = [
+                ("cbData", wintypes.DWORD),
+                ("pbData", ctypes.POINTER(wintypes.BYTE)),
+            ]
+
+        def make_blob(value: bytes):
+            buffer = (wintypes.BYTE * len(value)).from_buffer_copy(value)
+            return DataBlob(
+                len(value), ctypes.cast(buffer, ctypes.POINTER(wintypes.BYTE))
+            ), buffer
+
+        crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        input_blob, _input_buffer = make_blob(data)
+        output_blob = DataBlob()
+        flags = 0x1  # CRYPTPROTECT_UI_FORBIDDEN
+        if decrypt:
+            description = wintypes.LPWSTR()
+            crypt32.CryptUnprotectData.argtypes = [
+                ctypes.POINTER(DataBlob),
+                ctypes.POINTER(wintypes.LPWSTR),
+                ctypes.POINTER(DataBlob),
+                wintypes.LPVOID,
+                wintypes.LPVOID,
+                wintypes.DWORD,
+                ctypes.POINTER(DataBlob),
+            ]
+            crypt32.CryptUnprotectData.restype = wintypes.BOOL
+            ok = crypt32.CryptUnprotectData(
+                ctypes.byref(input_blob),
+                ctypes.byref(description),
+                None,
+                None,
+                None,
+                flags,
+                ctypes.byref(output_blob),
+            )
+        else:
+            crypt32.CryptProtectData.argtypes = [
+                ctypes.POINTER(DataBlob),
+                wintypes.LPCWSTR,
+                ctypes.POINTER(DataBlob),
+                wintypes.LPVOID,
+                wintypes.LPVOID,
+                wintypes.DWORD,
+                ctypes.POINTER(DataBlob),
+            ]
+            crypt32.CryptProtectData.restype = wintypes.BOOL
+            ok = crypt32.CryptProtectData(
+                ctypes.byref(input_blob),
+                "tarklone OAuth token",
+                None,
+                None,
+                None,
+                flags,
+                ctypes.byref(output_blob),
+            )
+        if not ok:
+            raise TokenStoreError(
+                f"Windows-DPAPI fehlgeschlagen (Fehler {ctypes.get_last_error()})."
+            )
+        try:
+            return ctypes.string_at(output_blob.pbData, output_blob.cbData)
+        finally:
+            kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
+            kernel32.LocalFree.restype = wintypes.HLOCAL
+            kernel32.LocalFree(ctypes.cast(output_blob.pbData, wintypes.HLOCAL))
+            if decrypt and description:
+                kernel32.LocalFree(ctypes.cast(description, wintypes.HLOCAL))
+
+    def _encode_fallback(self, raw: str) -> bytes:
+        payload = raw.encode("utf-8")
+        if os.name == "nt":
+            protected = self._dpapi(payload, decrypt=False)
+            return _DPAPI_PREFIX + base64.b64encode(protected)
+        return payload
+
+    def _decode_fallback(self, content: bytes) -> str:
+        if content.startswith(_DPAPI_PREFIX):
+            try:
+                protected = base64.b64decode(content[len(_DPAPI_PREFIX) :], validate=True)
+                return self._dpapi(protected, decrypt=True).decode("utf-8")
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise TokenStoreError("DPAPI-Token-Fallback ist beschädigt.") from exc
+        try:
+            raw = content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise TokenStoreError("Token-Fallback ist beschädigt.") from exc
+        if os.name == "nt":
+            # Migrate older plaintext Windows fallbacks immediately.
+            self._save_fallback(raw)
+        return raw
+
     def load(self) -> Token | None:
         raw_keyring = None
         try:
@@ -148,22 +255,48 @@ class TokenStore:
             raw_keyring = None
         token = self._parse(raw_keyring)
         if token is not None:
+            try:
+                self.fallback_path.unlink(missing_ok=True)
+            except OSError:
+                pass
             return token
         try:
-            raw_file = self.fallback_path.read_text(encoding="utf-8")
+            metadata = self.fallback_path.lstat()
+            if not stat.S_ISREG(metadata.st_mode):
+                return None
+            if os.name != "nt":
+                self.fallback_path.chmod(0o600)
+            raw_file = self._decode_fallback(self.fallback_path.read_bytes())
+        except TokenStoreError as exc:
+            logger.warning("Gespeicherte Zugangsdaten sind nicht lesbar: %s", exc)
+            return None
         except OSError:
             return None
         return self._parse(raw_file)
 
     def _save_fallback(self, raw: str) -> None:
-        self.fallback_path.parent.mkdir(parents=True, exist_ok=True)
-        temp = self.fallback_path.with_suffix(self.fallback_path.suffix + ".tmp")
-        temp.write_text(raw, encoding="utf-8")
+        self.fallback_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name != "nt":
+            self.fallback_path.parent.chmod(0o700)
+        payload = self._encode_fallback(raw)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{self.fallback_path.name}-",
+            suffix=".tmp",
+            dir=self.fallback_path.parent,
+        )
+        temp = Path(temp_name)
         try:
-            os.chmod(temp, 0o600)
-        except OSError:
-            pass
-        os.replace(temp, self.fallback_path)
+            if os.name != "nt":
+                os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, self.fallback_path)
+            if os.name != "nt":
+                self.fallback_path.chmod(0o600)
+        finally:
+            temp.unlink(missing_ok=True)
 
     def save(self, token: Token) -> None:
         raw = json.dumps(token.to_dict(), ensure_ascii=False)
@@ -172,7 +305,7 @@ class TokenStore:
             import keyring
 
             keyring.set_password(self.service, self.username, raw)
-            stored = True
+            stored = keyring.get_password(self.service, self.username) == raw
         except Exception:
             stored = False
         if stored:
@@ -181,19 +314,49 @@ class TokenStore:
             except OSError:
                 pass
         else:
+            # Do not leave a known stale keyring token taking precedence over
+            # the new fallback value.
+            try:
+                import keyring
+
+                current = keyring.get_password(self.service, self.username)
+            except Exception:
+                current = None
+                keyring = None
+            if current is not None and keyring is not None:
+                try:
+                    keyring.delete_password(self.service, self.username)
+                except Exception:
+                    pass
+                try:
+                    cleared = keyring.get_password(self.service, self.username) is None
+                except Exception:
+                    cleared = False
+                if not cleared:
+                    raise TokenStoreError(
+                        "Ein alter Token konnte nicht sicher aus dem Keyring "
+                        "entfernt werden; der neue Token wurde nicht gespeichert."
+                    )
             self._save_fallback(raw)
 
-    def delete(self) -> None:
-        try:
-            import keyring
-
-            keyring.delete_password(self.service, self.username)
-        except Exception:
-            pass
+    def delete(self) -> bool:
+        fallback_removed = True
         try:
             self.fallback_path.unlink(missing_ok=True)
         except OSError:
-            pass
+            fallback_removed = False
+        keyring_empty = False
+        try:
+            import keyring
+
+            try:
+                keyring.delete_password(self.service, self.username)
+            except Exception:
+                pass
+            keyring_empty = keyring.get_password(self.service, self.username) is None
+        except Exception:
+            keyring_empty = False
+        return fallback_removed and keyring_empty
 
 
 class _CallbackServer(ThreadingHTTPServer):
@@ -476,7 +639,27 @@ class OAuthClient:
             token = self.refresh(token)
         return token
 
-    def logout(self) -> None:
-        self.token_store.delete()
+    def logout(self) -> tuple[bool, bool]:
+        """Revokes the current server session when possible, then clears local storage.
+
+        Returns ``(local_deleted, remote_revoked)`` so callers never imply a
+        complete logout when either operation could not be verified.
+        """
+        token = self.token_store.load()
+        remote_revoked = token is None
+        if token is not None:
+            try:
+                response = self.http.post(
+                    LOGOUT_URL,
+                    headers={
+                        "apikey": ANON_KEY,
+                        "Authorization": f"Bearer {token.access_token}",
+                    },
+                )
+                remote_revoked = response.status_code < 400 or response.status_code == 401
+            except httpx.HTTPError:
+                remote_revoked = False
+        local_deleted = self.token_store.delete()
         self.settings.account_email = ""
         save_settings(self.settings)
+        return local_deleted, remote_revoked

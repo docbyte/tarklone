@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tarklone.state import SyncState
+from tarklone.state import EntryState, SyncState
 from tarklone.sync import (
     LocalScanner,
     RemoteEntry,
@@ -54,6 +54,7 @@ class MemoryRemote:
         *,
         mtime: float | None = None,
         remote_entry: RemoteEntry | None = None,
+        crypto_generation: int = 0,
     ) -> RemoteEntry:
         data = local_path.read_bytes()
         self.files[remote_path] = data
@@ -124,6 +125,54 @@ def test_sync_reports_progress(tmp_path: Path) -> None:
     assert events[-1].current == events[-1].total
     assert events[-1].percent == 100
     assert events[-1].eta_seconds == 0
+
+
+@pytest.mark.parametrize(
+    ("remote_generation", "remote_identity"),
+    [
+        (1, "tarklone-v2:1:older"),
+        (2, "tarklone-v2:2:unexpected"),
+    ],
+)
+def test_encrypted_remote_rollback_is_not_planned_as_download(
+    tmp_path: Path,
+    remote_generation: int,
+    remote_identity: str,
+) -> None:
+    engine, state = make_engine(tmp_path, MemoryRemote())
+    local_file = engine.local_root / "encrypted" / "secret.txt"
+    local_file.parent.mkdir()
+    local_file.write_text("trusted local version", encoding="utf-8")
+    local_map, _errors = engine.scanner.scan()
+    local = local_map["encrypted/secret.txt"]
+    previous = EntryState(
+        path="encrypted/secret.txt",
+        local_mtime_ns=local.mtime_ns,
+        local_size=local.size,
+        remote_id="remote-1",
+        remote_size=100,
+        remote_hash="tarklone-v2:2:current",
+    )
+    remote = RemoteEntry(
+        path="encrypted/secret.txt",
+        size=100,
+        entry_id="remote-1",
+        content_hash=remote_identity,
+        crypto_generation=remote_generation,
+    )
+    try:
+        actions = engine._plan(
+            local_map,
+            {remote.path: remote},
+            {previous.path: previous},
+            full=False,
+        )
+    finally:
+        state.close()
+
+    file_actions = [action for action in actions if action.path == remote.path]
+    assert len(file_actions) == 1
+    assert file_actions[0].kind == "rollback"
 
 
 def test_initial_upload(tmp_path: Path) -> None:

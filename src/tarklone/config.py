@@ -7,6 +7,7 @@ import re
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from platformdirs import user_config_dir, user_data_dir, user_log_dir
 
@@ -76,7 +77,58 @@ def log_path() -> Path:
 
 def ensure_dirs() -> None:
     for directory in (config_dir(), data_dir(), log_dir()):
-        directory.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name != "nt":
+            try:
+                directory.chmod(0o700)
+            except OSError:
+                pass
+
+
+def _validate_https_endpoint(
+    value: str,
+    *,
+    expected_host: str,
+    expected_path: str,
+) -> str:
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Ungültiger tarklone-Endpunkt.") from exc
+    if (
+        parsed.scheme.lower() != "https"
+        or (parsed.hostname or "").lower() != expected_host
+        or port not in (None, 443)
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path.rstrip("/") != expected_path.rstrip("/")
+    ):
+        raise ValueError(
+            f"Nicht erlaubter Endpunkt. Erwartet wird https://{expected_host}"
+            f"{expected_path}."
+        )
+    return f"https://{expected_host}{expected_path}"
+
+
+def validate_server_url(value: str) -> str:
+    """Validiert den Ursprung, an den Tarkle-Session-Cookies gesendet werden."""
+    return _validate_https_endpoint(
+        value,
+        expected_host="tarkle.com",
+        expected_path="/",
+    )
+
+
+def validate_mcp_url(value: str) -> str:
+    """Validiert den MCP-Endpunkt, an den das OAuth-Bearer-Token gesendet wird."""
+    return _validate_https_endpoint(
+        value,
+        expected_host="mcp.tarklesend.com",
+        expected_path="/mcp",
+    )
 
 
 @dataclass

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import os
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -52,14 +53,25 @@ CREATE TABLE IF NOT EXISTS meta (
 class SyncState:
     def __init__(self, path: Path):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name != "nt":
+            try:
+                self.path.parent.chmod(0o700)
+            except OSError:
+                pass
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA secure_delete=ON")
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
+        if os.name != "nt":
+            try:
+                self.path.chmod(0o600)
+            except OSError:
+                pass
 
     def close(self) -> None:
         with self._lock:
@@ -107,6 +119,13 @@ class SyncState:
                 "DELETE FROM entries WHERE path = ? OR path LIKE ?",
                 (prefix, prefix + "/%"),
             )
+            self._conn.commit()
+
+    def compact_sensitive_pages(self) -> None:
+        """Rewrites the DB after legacy plaintext metadata has been removed."""
+        with self._lock:
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self._conn.execute("VACUUM")
             self._conn.commit()
 
     def get_meta(self, key: str, default: str = "") -> str:

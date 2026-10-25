@@ -1,4 +1,4 @@
-# tarklone 1.2.1
+# tarklone 1.3
 
 Bidirektionaler Ordner-Sync zwischen Windows und [Tarkle](https://tarkle.com) – als Tray-App.
 
@@ -11,7 +11,7 @@ Bidirektionaler Ordner-Sync zwischen Windows und [Tarkle](https://tarkle.com) �
 ## Funktionen
 
 - Browser-Login bei Tarkle, ohne Passwort im Programm zu speichern
-- Zugriffstoken im Windows Credential Manager
+- Zugriffstoken im OS-Keyring; Windows-Dateifallback mit DPAPI geschützt
 - **Ein Tab pro Tarkle-Workspace** mit lokalem Ordner, Sync-Intervall, Lösch-Sync,
   Verschlüsselung und Speicheranzeige
 - **Mehrere Workspace-Profile** mit jeweils eigenem lokalen Ordner, Sync-Intervall,
@@ -21,7 +21,7 @@ Bidirektionaler Ordner-Sync zwischen Windows und [Tarkle](https://tarkle.com) �
 - **Speicherplatzanzeige** pro Workspace als Wert und horizontaler Balken
 - Optionaler AES-256-GCM-Ordner `encrypted/`: lokal lesbar, in Tarkle verschlüsselt
 - Datei- und Ordnernamen unter `encrypted/` werden zusätzlich mit AES-SIV verschlüsselt
-- Passwortgeschützter Master-Key; Passwortänderung ohne Neuverschlüsselung der Dateien oder Namen
+- Argon2id-geschützter Master-Key; Passwortänderung ohne Neuverschlüsselung der Dateien oder Namen
 - Konfliktkopien statt Überschreiben (`Name (Konflikt PC Zeitstempel).ext`)
 - Löschungen standardmäßig **nicht** übertragen; lokale Löschungen landen in `.tarklone/trash`
 - Tray-App mit Status, Fortschritt in Prozent und geschätzter Restzeit, manuellem Sync, Pause
@@ -97,7 +97,7 @@ python -m venv .venv
 | Zustand/Sync-Datenbank | `%LOCALAPPDATA%\docbyte\tarklone\profiles\<workspace-id>.sqlite3` |
 | Protokoll | `%LOCALAPPDATA%\docbyte\tarklone\Logs\tarklone.log` |
 | Zugriffstoken | Windows Credential Manager, Dienst `tarklone` |
-| Token-Fallback (headless) | `<AppData>\tarklone\token.json`, Dateimodus 0600 |
+| Token-Fallback (headless) | `<AppData>\tarklone\token.json` (POSIX: 0600; Windows: DPAPI) |
 | Verschlüsselungs-Keyfile | `<Sync-Ordner>\encrypted\.tarklone-key.json` |
 
 Beim ersten Start wird die bisherige Einzelkonfiguration automatisch in ein
@@ -132,16 +132,27 @@ und als horizontalen Balken.
 In den Einstellungen kann ein Passwort für den Unterordner `encrypted/` gesetzt
 werden. Der Ordner wird beim Setzen des Passworts angelegt.
 
+> **Upgrade-Hinweis 1.3:** Aktualisiere alle Rechner auf 1.3, bevor du den
+> verschlüsselten Workspace auf einem Rechner entsperrst oder neue Dateien
+> synchronisierst. Die neue Keyfile-/Dateiversion wird von 1.2.1 und älteren
+> Builds nicht unterstützt.
+
 - Lokal liegen die Dateien im Klartext und bleiben normal nutzbar.
 - Beim Upload werden die Inhalte mit **AES-256-GCM** verschlüsselt; in Tarkle
-  liegt nur Ciphertext.
+  liegt nur Ciphertext. Neue Inhalte verwenden eigene Dateischlüssel und
+  authentifizieren zusätzlich den logischen Pfad und eine Dateirevision.
 - Datei- und Ordnernamen unter `encrypted/` werden mit **AES-SIV** verschlüsselt.
   Tarkle sieht nur Token-Namen; der lokale Klartextname bleibt erhalten.
 - Beim Download werden Inhalt und Namen wieder entschlüsselt.
-- Das Passwort verpackt einen zufälligen 32-Byte-Master-Key. Dateien und Namen
-  werden mit diesem Master-Key verschlüsselt; bei einer Passwortänderung wird
-  nur der Master-Key neu verpackt. **Dateien und Namen werden nicht neu
-  verschlüsselt.**
+- Das Passwort verpackt einen zufälligen 32-Byte-Master-Key mit **Argon2id**.
+  Neue Passwörter müssen mindestens 12 Zeichen lang sein. Ältere PBKDF2-Keyfiles
+  werden beim erfolgreichen Entsperren auf Argon2id umgestellt.
+- Der Master-Key wird in getrennte Dateiinhalts- und Namensschlüssel abgeleitet.
+  Bei einer Passwortänderung wird nur der Master-Key neu verpackt.
+  **Dateien und Namen werden dabei nicht neu verschlüsselt.**
+- Für automatisches Entsperren wird der Master-Key im OS-Keyring zwischengespeichert.
+  **Sperren** entfernt diesen Cache; Schadsoftware unter demselben angemeldeten
+  Benutzerkonto kann grundsätzlich auf dessen Keyring zugreifen.
 - Die Schlüsseldatei `encrypted/.tarklone-key.json` enthält nur den mit dem
   Passwort verpackten Master-Key und wird mitgesynct. Der Dateiname der
   Schlüsseldatei bleibt sichtbar; er enthält keine Nutzdatennamen.
@@ -160,6 +171,16 @@ werden. Der Ordner wird beim Setzen des Passworts angelegt.
   kopiert, nicht neu verschlüsselt.
 - Sehr lange Datei-/Ordnernamen können das Token-Limit überschreiten; dann
   meldet der Sync einen Fehler und der Name muss gekürzt werden.
+- Ältere Inhaltsdateien werden bei vorhandenem lokalen Klartext beim nächsten Sync
+  in das pfadgebundene Format migriert. Gleichheit von Namen und Dateigrößen sowie
+  Änderungszeitpunkte bleiben als Metadaten für Tarkle sichtbar.
+- Ein bereits eingerichteter Client erkennt rückläufige oder widersprüchliche
+  verschlüsselte Revisionen und lädt sie nicht stillschweigend herunter. Ein
+  frischer Client hat noch keinen lokalen Revisionsstand, daher bleibt die
+  Wiederherstellung alter Daten durch einen vertrauenswürdigen Speicheranbieter
+  grundsätzlich möglich.
+- Lokale Dateien unter `encrypted/` bleiben Klartext. App-Logs schwärzen ihre
+  Dateinamen; der lokale Sync-Zustand speichert dafür deterministische Namenstoken.
 
 ### Danger Zone: Schlüssel löschen
 
@@ -180,6 +201,8 @@ Passwort zu setzen.
 - **Nach Updates suchen** prüft das öffentliche GitHub-Release.
 - Gibt es eine neuere Version, wird die passende Datei für Windows, Ubuntu oder
   macOS automatisch heruntergeladen (standardmäßig in den Downloads-Ordner).
+- Der Download wird nur gespeichert, wenn die passende SHA-256-Prüfsumme
+  erfolgreich geladen und geprüft wurde.
 - Die Installation erfolgt manuell; die laufende EXE wird nicht überschrieben.
 - Das Intervall ist einstellbar: **Nie**, **Täglich**, **Alle 7 Tage** oder
   **Alle 30 Tage**.
@@ -236,7 +259,9 @@ Unter `builds/` liegen Varianten für Ubuntu, macOS und eine reine CLI:
 Details und Voraussetzungen: `builds/README.md`. Der GitHub-Actions-Workflow
 `.github/workflows/build-platforms.yml` baut alle Varianten und hängt sie bei
 einem Tag `v*` an das Release. Die Update-Prüfung nutzt die öffentliche
-GitHub-API und das neueste Release.
+GitHub-API und das neueste Release. Release-Assets erhalten außerdem eine
+GitHub-Build-Provenance-Attestierung. Sie lässt sich beispielsweise mit
+`gh attestation verify <datei> --repo docbyte/tarklone` prüfen.
 
 Die GUI-Varianten sind unter Linux/macOS derzeit **experimentell**; die CLI
 ist auf allen drei Plattformen die robusteste Variante.

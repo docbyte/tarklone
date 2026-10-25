@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
 import re
 import sys
@@ -8,6 +9,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -15,6 +17,11 @@ from . import __version__
 
 GITHUB_REPO = "docbyte/tarklone"
 LATEST_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+_ALLOWED_RELEASE_HOSTS = {
+    "github.com",
+    "release-assets.githubusercontent.com",
+    "objects.githubusercontent.com",
+}
 
 
 class UpdateError(RuntimeError):
@@ -73,6 +80,40 @@ def select_checksum_asset(assets: list[dict[str, Any]]) -> dict[str, Any] | None
     return None
 
 
+def _validate_release_url(url: str, *, checksum: bool = False) -> str:
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except (TypeError, ValueError) as exc:
+        raise UpdateError("Ungültige GitHub-Release-URL.") from exc
+    expected_prefix = f"/{GITHUB_REPO}/releases/download/"
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "github.com"
+        or port not in (None, 443)
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.startswith(expected_prefix)
+    ):
+        label = "Prüfsummen" if checksum else "Update"
+        raise UpdateError(f"{label}-URL ist kein gültiger tarklone-GitHub-Release-Link.")
+    return url
+
+
+def _validate_asset_name(name: str) -> str:
+    if (
+        not name
+        or name in {".", ".."}
+        or "/" in name
+        or "\\" in name
+        or Path(name).name != name
+    ):
+        raise UpdateError("Release enthält einen ungültigen Dateinamen.")
+    return name
+
+
 def check_for_update(
     current_version: str | None = None,
     *,
@@ -91,6 +132,8 @@ def check_for_update(
         )
     except httpx.HTTPError as exc:
         raise UpdateError(f"GitHub ist nicht erreichbar: {exc}") from exc
+    if urlsplit(str(response.url)).hostname != "api.github.com":
+        raise UpdateError("GitHub-API hat auf einen nicht erlaubten Host umgeleitet.")
     if response.status_code == 404:
         raise UpdateError(
             "Kein öffentliches Release gefunden. Ist das Repository öffentlich "
@@ -117,14 +160,24 @@ def check_for_update(
             f"Für diese Plattform ({sys.platform}) gibt es kein passendes Update-Asset."
         )
     checksum = select_checksum_asset(assets)
+    if checksum is None:
+        raise UpdateError("Release enthält keine SHA-256-Prüfsummendatei.")
+    asset_name = _validate_asset_name(str(asset.get("name") or ""))
+    checksum_name = _validate_asset_name(str(checksum.get("name") or ""))
+    if not checksum_name.lower().startswith("sha256sums"):
+        raise UpdateError("Ungültiger Name der Prüfsummendatei.")
+    asset_url = _validate_release_url(str(asset.get("browser_download_url") or ""))
+    checksum_url = _validate_release_url(
+        str(checksum.get("browser_download_url") or ""), checksum=True
+    )
     return UpdateInfo(
         version=version,
         tag=tag,
         name=str(data.get("name") or tag),
         html_url=str(data.get("html_url") or ""),
-        asset_name=str(asset.get("name") or ""),
-        asset_url=str(asset.get("browser_download_url") or ""),
-        checksum_url=str(checksum.get("browser_download_url") or "") if checksum else "",
+        asset_name=asset_name,
+        asset_url=asset_url,
+        checksum_url=checksum_url,
         notes=str(data.get("body") or ""),
     )
 
@@ -140,7 +193,11 @@ def _sha256(path: Path) -> str:
 def _checksum_for(checksum_text: str, asset_name: str) -> str:
     for line in checksum_text.splitlines():
         parts = line.strip().split()
-        if len(parts) >= 2 and parts[-1].lstrip("*") == asset_name:
+        if (
+            len(parts) >= 2
+            and parts[-1].lstrip("*") == asset_name
+            and re.fullmatch(r"[0-9a-fA-F]{64}", parts[0])
+        ):
             return parts[0].lower()
     return ""
 
@@ -153,11 +210,35 @@ def default_download_dir() -> Path:
 
 
 def download_update(info: UpdateInfo, destination_dir: Path | None = None) -> Path:
+    _validate_asset_name(info.asset_name)
+    _validate_release_url(info.asset_url)
+    _validate_release_url(info.checksum_url, checksum=True)
     target_dir = Path(destination_dir) if destination_dir else default_download_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
     destination = target_dir / info.asset_name
-    temp = destination.with_suffix(destination.suffix + ".part")
+    fd, temp_name = tempfile.mkstemp(
+        prefix=".tarklone-update-", suffix=".part", dir=target_dir
+    )
+    temp = Path(temp_name)
     try:
+        try:
+            checksum_response = httpx.get(
+                info.checksum_url,
+                headers={"User-Agent": f"tarklone/{__version__}"},
+                timeout=30.0,
+                follow_redirects=True,
+            )
+        except httpx.HTTPError as exc:
+            raise UpdateError(f"Prüfsummendatei konnte nicht geladen werden: {exc}") from exc
+        if checksum_response.status_code != 200:
+            raise UpdateError(
+                f"Prüfsummendownload fehlgeschlagen: HTTP {checksum_response.status_code}"
+            )
+        if urlsplit(str(checksum_response.url)).hostname not in _ALLOWED_RELEASE_HOSTS:
+            raise UpdateError("Prüfsummendownload wurde auf einen nicht erlaubten Host umgeleitet.")
+        expected = _checksum_for(checksum_response.text, info.asset_name)
+        if not expected:
+            raise UpdateError("Prüfsummendatei enthält keinen gültigen Hash für das Asset.")
         with httpx.stream(
             "GET",
             info.asset_url,
@@ -169,28 +250,18 @@ def download_update(info: UpdateInfo, destination_dir: Path | None = None) -> Pa
                 raise UpdateError(
                     f"Download fehlgeschlagen: HTTP {response.status_code}"
                 )
-            with temp.open("wb") as handle:
+            if urlsplit(str(response.url)).hostname not in _ALLOWED_RELEASE_HOSTS:
+                raise UpdateError("Update wurde auf einen nicht erlaubten Host umgeleitet.")
+            with os.fdopen(fd, "wb") as handle:
+                fd = -1
                 for chunk in response.iter_bytes(1024 * 1024):
                     handle.write(chunk)
-        if info.checksum_url:
-            try:
-                checksum_response = httpx.get(
-                    info.checksum_url,
-                    headers={"User-Agent": f"tarklone/{__version__}"},
-                    timeout=30.0,
-                    follow_redirects=True,
-                )
-                if checksum_response.status_code == 200:
-                    expected = _checksum_for(checksum_response.text, info.asset_name)
-                    if expected:
-                        actual = _sha256(temp)
-                        if actual != expected:
-                            raise UpdateError("SHA-256-Prüfsumme des Updates stimmt nicht.")
-            except httpx.HTTPError:
-                # Ein nicht erreichbares Checksum-Asset blockiert den Download
-                # nicht; der Download selbst ist bereits geprüft.
-                pass
+        actual = _sha256(temp)
+        if not hmac.compare_digest(actual, expected):
+            raise UpdateError("SHA-256-Prüfsumme des Updates stimmt nicht.")
         os.replace(temp, destination)
         return destination
     finally:
+        if fd >= 0:
+            os.close(fd)
         temp.unlink(missing_ok=True)
