@@ -1,4 +1,4 @@
-# tarklone 1.2
+# tarklone 1.2.1
 
 Bidirektionaler Ordner-Sync zwischen Windows und [Tarkle](https://tarkle.com) – als Tray-App.
 
@@ -12,7 +12,8 @@ Bidirektionaler Ordner-Sync zwischen Windows und [Tarkle](https://tarkle.com) �
 
 - Browser-Login bei Tarkle, ohne Passwort im Programm zu speichern
 - Zugriffstoken im Windows Credential Manager
-- Workspace-Auswahl direkt im Einrichtungsfenster
+- **Ein Tab pro Tarkle-Workspace** mit lokalem Ordner, Sync-Intervall, Lösch-Sync,
+  Verschlüsselung und Speicheranzeige
 - **Mehrere Workspace-Profile** mit jeweils eigenem lokalen Ordner, Sync-Intervall,
   Löschverhalten und eigener Verschlüsselung
 - Bidirektionaler Sync eines lokalen Ordners mit dem Workspace-Root oder einem Remote-Ordnerpfad
@@ -57,17 +58,16 @@ python -m venv .venv
 
    Beim ersten Start öffnet sich das Einrichtungsfenster:
 
-   - Tarkle-Workspace aus der Liste wählen (nach dem Login automatisch geladen)
-   - lokalen Ordner auswählen
-   - optional einen Remote-Ordnerpfad eintragen, z. B. `Kunden/Projekt`
-     (leer = Workspace-Root)
-   - Sync-Intervall und Löschverhalten festlegen
-   - **Profil übernehmen** klicken
+   - Nach dem Login erscheint für jeden Tarkle-Workspace ein eigener Tab.
+   - Im Tab unter **Sync** den lokalen Ordner auswählen, optional einen
+     Remote-Ordnerpfad eintragen (leer = Workspace-Root), das Sync-Intervall
+     festlegen und die Löschungsübertragung aktivieren.
+   - Der Abschnitt **Verschlüsselung** im selben Tab gilt nur für diesen Workspace.
+   - Der Abschnitt **Speicherplatz** zeigt den belegten Speicher als Wert und Balken.
+   - **Allgemeines** bleibt unter den Tabs sichtbar und gilt für alle Workspaces.
 
-   Für weitere Workspaces den nächsten Workspace wählen, einen eigenen lokalen
-   Ordner zuweisen und wieder **Profil übernehmen** klicken. Jedes Profil wird
-   anschließend mit seinem eigenen Intervall synchronisiert. Verschlüsselung und
-   Speicheranzeige beziehen sich jeweils auf das ausgewählte Profil.
+   Jeder Workspace wird anschließend mit seinem eigenen Intervall synchronisiert.
+   Workspaces ohne lokalen Ordner werden nicht synchronisiert.
 
    Danach läuft tarklone im Infobereich. Ein Doppelklick auf das Symbol startet
    einen Sync aller Profile; das Kontextmenü bietet Einstellungen, Pause,
@@ -112,8 +112,8 @@ die Anzahl der ausstehenden Profile angezeigt. Der Fortschritt wird aus den
 geplanten Sync-Aktionen berechnet; bei sehr großen einzelnen Dateien springt er
 erst nach Abschluss der Datei weiter.
 
-Die Einstellungen zeigen für den ausgewählten Workspace den belegten Speicher
-als Wert und als horizontalen Balken.
+Die Einstellungen zeigen im Tab jedes Workspaces den belegten Speicher als Wert
+und als horizontalen Balken.
 
 ## Sync-Verhalten
 

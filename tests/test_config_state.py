@@ -65,6 +65,31 @@ def test_multiple_profiles_roundtrip(tmp_path: Path) -> None:
     assert loaded.enabled_profiles == loaded.profiles
 
 
+def test_disabled_workspace_profiles_are_ignored(tmp_path: Path) -> None:
+    settings = Settings(
+        profiles=[
+            SyncProfile(
+                id="ws-1",
+                workspace_id="ws-1",
+                local_folder=str(tmp_path),
+                enabled=True,
+            ),
+            SyncProfile(
+                id="ws-2",
+                workspace_id="ws-2",
+                local_folder="",
+                enabled=False,
+            ),
+        ]
+    )
+    assert settings.validation_errors() == []
+    assert settings.is_configured
+    assert [profile.id for profile in settings.enabled_profiles] == ["ws-1"]
+    settings.profiles[0].enabled = False
+    assert not settings.is_configured
+    assert any("Profil" in error for error in settings.validation_errors())
+
+
 def test_profile_paths_are_stable_and_safe() -> None:
     assert profile_state_path("ws-1").name == "ws-1.sqlite3"
     assert "/" not in profile_state_path("../../evil").name

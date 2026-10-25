@@ -146,7 +146,10 @@ class Settings:
     def sync_legacy_fields(self) -> None:
         if not self.profiles:
             return
-        first = self.profiles[0]
+        first = next(
+            (profile for profile in self.profiles if profile.enabled),
+            self.profiles[0],
+        )
         self.local_folder = first.local_folder
         self.workspace_id = first.workspace_id
         self.workspace_name = first.workspace_name
@@ -163,7 +166,9 @@ class Settings:
     @property
     def is_configured(self) -> bool:
         return any(
-            profile.local_folder and profile.workspace_id
+            profile.enabled
+            and profile.local_folder
+            and profile.workspace_id
             for profile in self.profiles
         )
 
@@ -178,9 +183,10 @@ class Settings:
     def validation_errors(self) -> list[str]:
         errors: list[str] = []
         self.ensure_profiles()
-        if not self.profiles:
+        active = [profile for profile in self.profiles if profile.enabled]
+        if not active:
             errors.append("Kein Workspace-Profil eingerichtet.")
-        for profile in self.profiles:
+        for profile in active:
             label = profile.display_name
             if not profile.local_folder:
                 errors.append(f"[{label}] Kein lokaler Ordner ausgewählt.")

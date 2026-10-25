@@ -157,7 +157,10 @@ def cmd_status(_args: argparse.Namespace) -> int:
 
 def cmd_init(_args: argparse.Namespace) -> int:
     settings = load_settings()
-    first = settings.profiles[0] if settings.profiles else None
+    first = next(
+        (profile for profile in settings.profiles if profile.enabled),
+        settings.profiles[0] if settings.profiles else None,
+    )
     print("Einrichtung von tarklone")
     print("========================")
     default_local = first.local_folder if first else settings.local_folder
@@ -197,6 +200,7 @@ def cmd_init(_args: argparse.Namespace) -> int:
     profile.local_folder = local_folder
     profile.remote_folder_id = folder.strip().replace("\\", "/").strip("/")
     profile.sync_interval_seconds = interval
+    profile.enabled = True
     settings.sync_legacy_fields()
     save_settings(settings)
     print("Gespeichert. Anschließend `tarklone login` und `tarklone sync` ausführen.")
