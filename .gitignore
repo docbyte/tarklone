@@ -1,9 +1,12 @@
 .venv/
+.venv-*/
 __pycache__/
 *.py[cod]
 *.egg-info/
 build/
 dist/
+builds/*/dist/
+builds/*/build/
 .pytest_cache/
 .coverage
 htmlcov/

@@ -22,6 +22,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=9", "ruff>=0.17"]
+linux = ["python-xlib>=0.33", "secretstorage>=3.3"]
+macos = ["pyobjc-core>=10", "pyobjc-framework-Cocoa>=10"]
 
 [project.scripts]
 tarklone = "tarklone.cli:main"

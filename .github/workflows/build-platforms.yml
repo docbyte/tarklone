@@ -1,0 +1,132 @@
+name: Build platform variants
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  cli:
+    name: CLI (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            script: builds/cli/build.sh
+            artifact: tarklone-cli-linux
+          - os: macos-latest
+            script: builds/cli/build.sh
+            artifact: tarklone-cli-macos
+          - os: windows-latest
+            script: builds/cli/build.ps1
+            artifact: tarklone-cli-windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build CLI (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ${{ matrix.script }}
+      - name: Build CLI (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ${{ matrix.script }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: builds/cli/dist/**
+          if-no-files-found: error
+
+  gui-ubuntu:
+    name: GUI (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux GUI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3-venv python3-tk \
+            libx11-6 libxext6 libxrender1 libxtst6 libxi6 libxfixes3 \
+            libxdamage1 libxcomposite1 libxrandr2 libxcursor1 libxinerama1
+      - name: Build Ubuntu GUI
+        env:
+          PYTHON: /usr/bin/python3
+        run: bash builds/ubuntu/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarklone-ubuntu
+          path: builds/ubuntu/dist/tarklone-ubuntu
+          if-no-files-found: error
+
+  gui-macos:
+    name: GUI (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Ensure Tk is available
+        run: |
+          if ! python3 -c "import tkinter"; then
+            brew install python@3.12 python-tk@3.12
+            PYTHON="$(brew --prefix python@3.12)/bin/python3.12"
+            echo "PYTHON=$PYTHON" >> "$GITHUB_ENV"
+          fi
+      - name: Build macOS GUI
+        run: bash builds/macos/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarklone-macos
+          path: builds/macos/dist/tarklone-macos.zip
+          if-no-files-found: error
+
+  gui-windows:
+    name: GUI (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build Windows GUI
+        shell: pwsh
+        run: .\builds\windows\build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarklone-windows
+          path: dist\tarklone-single.exe
+          if-no-files-found: error
+
+  release-assets:
+    name: Attach assets to release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - cli
+      - gui-ubuntu
+      - gui-macos
+      - gui-windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tarklone-*
+          path: release-assets
+          merge-multiple: true
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -lh release-assets
+          gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber

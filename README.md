@@ -156,6 +156,25 @@ werden. Der Ordner wird beim Setzen des Passworts angelegt.
 Ergebnis: `dist\tarklone.exe`. Die EXE startet ohne Konsolenfenster direkt als Tray-App.
 Der Autostart-Eintrag zeigt bei einer gebauten EXE auf diese Datei.
 
+### Plattform-Builds
+
+Unter `builds/` liegen Varianten für Ubuntu, macOS und eine reine CLI:
+
+| Variante | Skript |
+|---|---|
+| Ubuntu GUI | `builds/ubuntu/build.sh` |
+| macOS GUI | `builds/macos/build.sh` |
+| CLI Linux/macOS | `builds/cli/build.sh` |
+| CLI Windows | `builds/cli/build.ps1` |
+| Windows GUI | `builds/windows/build.ps1` |
+
+Details und Voraussetzungen: `builds/README.md`. Der GitHub-Actions-Workflow
+`.github/workflows/build-platforms.yml` baut alle Varianten und hängt sie bei
+einem Tag `v*` an das Release.
+
+Die GUI-Varianten sind unter Linux/macOS derzeit **experimentell**; die CLI
+ist auf allen drei Plattformen die robusteste Variante.
+
 ### Single-EXE-Variante
 
 Für eine explizit reproduzierbare Variante mit eigener PyInstaller-Spec und

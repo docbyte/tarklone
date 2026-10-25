@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -37,12 +38,29 @@ COLORS = {
 }
 
 
+def open_path(path: Path | str) -> None:
+    """Öffnet einen Ordner/eine Datei mit dem Systemstandard."""
+    target = str(path)
+    if sys.platform == "win32":
+        os.startfile(target)  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", target])
+    else:
+        subprocess.Popen(["xdg-open", target])
+
+
 def make_icon(color: str = COLORS["idle"]) -> Image.Image:
     image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
     draw.rounded_rectangle((2, 2, 62, 62), radius=16, fill=color)
     font = None
-    for candidate in ("C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf"):
+    for candidate in (
+        "C:/Windows/Fonts/segoeuib.ttf",
+        "C:/Windows/Fonts/arialbd.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ):
         try:
             font = ImageFont.truetype(candidate, 34)
             break
@@ -247,7 +265,7 @@ class TarkloneApp:
     def _action_open_folder(self, icon=None, item=None) -> None:
         folder = self.settings.local_folder
         if folder and Path(folder).is_dir():
-            os.startfile(folder)  # type: ignore[attr-defined]
+            open_path(folder)
         else:
             self._notify("Kein gültiger lokaler Ordner konfiguriert.")
 
@@ -258,7 +276,7 @@ class TarkloneApp:
     def _action_open_log(self, icon=None, item=None) -> None:
         path = log_path()
         if path.exists():
-            os.startfile(str(path))  # type: ignore[attr-defined]
+            open_path(path)
         else:
             self._notify("Noch keine Logdatei vorhanden.")
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import sys
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -252,11 +253,12 @@ class SetupDialog(tk.Toplevel):
             text="Beim Start minimiert im Tray starten",
             variable=self.start_minimized_var,
         ).pack(anchor="w")
-        ttk.Checkbutton(
-            options,
-            text="Beim Windows-Login automatisch starten",
-            variable=self.launch_var,
-        ).pack(anchor="w", pady=(2, 0))
+        if sys.platform == "win32":
+            ttk.Checkbutton(
+                options,
+                text="Beim Windows-Login automatisch starten",
+                variable=self.launch_var,
+            ).pack(anchor="w", pady=(2, 0))
 
         encryption = tk.Frame(outer, bg=BACKGROUND)
         encryption.pack(fill="x", pady=(14, 0))
@@ -648,8 +650,8 @@ class SetupDialog(tk.Toplevel):
 
 def apply_launch_at_login(enabled: bool) -> None:
     """Trägt tarklone in den Windows-Autostart ein oder entfernt es."""
-    import sys
-
+    if sys.platform != "win32":
+        return
     try:
         import winreg
     except ImportError:

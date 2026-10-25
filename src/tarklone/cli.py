@@ -292,8 +292,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _run_tray() -> int:
-    from .app import main as tray_main
-
+    try:
+        from .app import main as tray_main
+    except ImportError:
+        print(
+            "Der Tray-Modus ist in dieser reinen CLI-Version nicht enthalten. "
+            "Bitte die GUI-Variante für deine Plattform verwenden.",
+            file=sys.stderr,
+        )
+        return 2
     return tray_main()
 
 
