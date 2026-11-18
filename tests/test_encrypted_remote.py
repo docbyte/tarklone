@@ -76,6 +76,37 @@ class FakeRemote:
         return None
 
 
+def test_encrypted_create_folder_uses_token_name(tmp_path: Path) -> None:
+    local = tmp_path / "local"
+    local.mkdir()
+    manager = EncryptionManager(local, iterations=10_000, cache_in_keyring=False)
+    manager.set_password("a-long-unique-passphrase")
+
+    class FolderRemote(FakeRemote):
+        supports_empty_folders = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.dirs: list[str] = []
+
+        def create_folder(self, remote_path: str) -> RemoteEntry:
+            self.dirs.append(remote_path)
+            return RemoteEntry(
+                path=remote_path,
+                kind="dir",
+                entry_id="folder-id",
+                parent_id="parent-id",
+            )
+
+    remote = FolderRemote()
+    adapter = EncryptionAdapter(remote, manager)
+    entry = adapter.create_folder("encrypted/Sub")
+    assert remote.dirs == [manager.encrypt_path("encrypted/Sub")]
+    assert entry.path == "encrypted/Sub"
+    assert entry.entry_id == "folder-id"
+    assert entry.parent_id == "parent-id"
+
+
 def test_encrypted_sync_roundtrip_and_password_change(tmp_path: Path) -> None:
     local = tmp_path / "local"
     local.mkdir()

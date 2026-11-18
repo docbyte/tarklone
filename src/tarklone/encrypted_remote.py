@@ -433,4 +433,17 @@ class EncryptionAdapter:
         self.remote.delete(entry)
 
     def create_folder(self, remote_path: str) -> RemoteEntry | None:
-        return self.remote.create_folder(remote_path)
+        if not self.encryption.enabled or not self.encryption.is_encrypted_path(remote_path):
+            return self.remote.create_folder(remote_path)
+        if not self.encryption.unlocked:
+            raise SyncError(
+                "Die Verschlüsselung ist gesperrt. Bitte das Passwort eingeben."
+            )
+        token_path = self.encryption.encrypt_path(remote_path)
+        created = self.remote.create_folder(token_path)
+        return RemoteEntry(
+            path=remote_path,
+            kind="dir",
+            entry_id=created.entry_id if created is not None else "",
+            parent_id=created.parent_id if created is not None else "",
+        )

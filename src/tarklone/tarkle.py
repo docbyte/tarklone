@@ -3,160 +3,147 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .auth import Token
-from .config import Settings
-from .mcp import McpClient, tool_json
-from .sync import RemoteEntry, RemoteUnsupported, SyncError
-from .webapi import TarkleWeb, WebApiError, _parse_time
-
-_CONTEXT = (
-    "Synchronizing a user's local folder with their Tarkle workspace "
-    "to keep both locations up to date."
-)
+from .api import TarkleApi, TarkleApiError, _parse_time
+from .config import Settings, is_workspace_key
+from .sync import RemoteEntry, SyncError
 
 
 class TarkleRemote:
-    """Tarkle-Anbindung über MCP (Liste/Upload) und die Web-API (Download/Löschen)."""
+    """Tarkle-Anbindung über die offizielle API v1."""
 
-    # Tarkle legt Ordner erst beim ersten Upload einer Datei an.
-    supports_empty_folders = False
+    # Die API kann leere Ordner direkt anlegen.
+    supports_empty_folders = True
 
-    def __init__(self, settings: Settings, token: Token | str):
-        if isinstance(token, str):
-            from .auth import jwt_claims
-
-            claims = jwt_claims(token)
-            token = Token(
-                access_token=token,
-                expires_at=float(claims.get("exp", 0) or 0),
-                email=str(claims.get("email", "")),
+    def __init__(self, settings: Settings, api_key: str):
+        workspace_key = (settings.workspace_id or "").strip()
+        if not is_workspace_key(workspace_key):
+            raise SyncError(
+                "Kein gültiger Tarkle-Workspace-Key (8 Zeichen) im Profil."
             )
         self.settings = settings
-        self.mcp = McpClient(settings.mcp_url, token.access_token)
-        self.web = TarkleWeb(settings, token)
+        self.workspace_key = workspace_key
+        self.api = TarkleApi(api_key)
         self._items: dict[str, dict[str, Any]] = {}
+        self._folder_ids: dict[str, str] = {"": ""}
         self._target_path = ""
 
     def close(self) -> None:
-        self.mcp.close()
-        self.web.close()
+        self.api.close()
 
     @property
     def target_path(self) -> str:
         return self._target_path
 
-    def _mcp_call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        payload = dict(arguments)
-        payload.setdefault("context", _CONTEXT)
-        payload.setdefault("llm_model", "unknown")
-        result = self.mcp.call_tool(name, payload)
-        structured = result.get("structuredContent")
-        if isinstance(structured, dict):
-            return structured
-        parsed = tool_json(result)
-        return parsed if isinstance(parsed, dict) else {}
-
     def list_workspaces(self) -> list[dict[str, str]]:
-        self.mcp.initialize()
-        data = self._mcp_call("tarkle_list_workspaces", {})
-        workspaces = data.get("workspaces")
-        if not isinstance(workspaces, list):
-            return []
-        return [
-            {
-                "id": str(item.get("workspaceId", "")),
-                "name": str(item.get("name", "")),
-                "role": str(item.get("role", "")),
-            }
-            for item in workspaces
-            if isinstance(item, dict) and item.get("workspaceId")
-        ]
+        return self.api.list_workspaces()
 
     def list_tree(self) -> list[RemoteEntry]:
-        if not self.settings.workspace_id:
-            raise RemoteUnsupported("Kein Tarkle-Workspace konfiguriert.")
-        raw_items = list(self.web.list_tree_items(self.settings.workspace_id))
-        self._items.clear()
-
-        target_path = ""
-        target = (
-            self.settings.remote_folder_id.strip().replace("\\", "/").strip("/")
+        raw_items, target_path, root_id = self.api.list_tree(
+            self.workspace_key,
+            self.settings.remote_folder_id,
         )
-        if target:
-            for path, kind, item in raw_items:
-                if kind != "dir":
-                    continue
-                if (
-                    path == target
-                    or str(item.get("id")) == target
-                    or str(item.get("folder_id")) == target
-                ):
-                    target_path = path
-                    break
-            if not target_path:
-                raise SyncError(f"Remote-Ordner nicht gefunden: {target}")
-
         self._target_path = target_path
+        self._items.clear()
+        self._folder_ids = {"": root_id}
         entries: list[RemoteEntry] = []
-        for path, kind, item in raw_items:
-            if target_path:
-                if not path.startswith(target_path + "/"):
-                    continue
-                relative = path[len(target_path) + 1 :]
-            else:
-                relative = path
-            if kind == "file":
-                entry_id = str(item.get("id", ""))
-                self._items[entry_id] = item
+        for item in raw_items:
+            path = str(item.get("rel_path") or "")
+            if not path:
+                continue
+            entry_id = str(item.get("id") or "")
+            parent_id = str(item.get("parent_id") or "")
+            if item.get("type") == "folder":
+                self._folder_ids[path] = entry_id
                 entries.append(
                     RemoteEntry(
-                        path=relative,
-                        kind="file",
-                        size=int(item.get("size") or 0),
-                        mtime=_parse_time(item.get("updated_at")),
-                        entry_id=entry_id,
-                        parent_id=str(item.get("folder_id") or ""),
-                    )
-                )
-            else:
-                entries.append(
-                    RemoteEntry(
-                        path=relative,
+                        path=path,
                         kind="dir",
-                        entry_id=str(item.get("id") or ""),
-                        parent_id=str(item.get("parent_folder") or ""),
+                        entry_id=entry_id,
+                        parent_id=parent_id,
                     )
                 )
+                continue
+            self._items[entry_id] = item
+            entries.append(
+                RemoteEntry(
+                    path=path,
+                    kind="file",
+                    size=int(item.get("size") or 0),
+                    mtime=_parse_time(
+                        item.get("modified_at") or item.get("updated_at")
+                    ),
+                    entry_id=entry_id,
+                    content_hash=str(item.get("sha256") or ""),
+                    parent_id=parent_id,
+                )
+            )
         return entries
 
     def _find_item(self, entry: RemoteEntry) -> dict[str, Any]:
         item = self._items.get(entry.entry_id)
         if item:
             return item
-        lookup_path = entry.remote_path or entry.path
-        for candidate in self.web.search_files(
-            self.settings.workspace_id,
-            query=PurePosixPath(lookup_path).name,
-        ):
-            if str(candidate.get("id")) == entry.entry_id or str(
-                candidate.get("file_id")
-            ) == entry.entry_id:
-                self._items[entry.entry_id] = candidate
-                return candidate
-        raise WebApiError(f"Datei nicht in Tarkle gefunden: {entry.path}")
+        item = self.api.get_file(self.workspace_key, entry.entry_id)
+        if item.get("type") != "file":
+            raise TarkleApiError(f"Kein Datei-Eintrag für {entry.path}.")
+        self._items[entry.entry_id] = item
+        return item
 
     def download(self, entry: RemoteEntry, destination: Path) -> None:
         item = self._find_item(entry)
-        self.web.download_to(item, self.settings.workspace_id, destination)
+        self.api.download_to(self.workspace_key, item, destination)
 
     def download_range(self, entry: RemoteEntry, start: int, length: int) -> bytes:
-        item = self._find_item(entry)
-        return self.web.download_range(
-            item,
-            self.settings.workspace_id,
+        return self.api.download_range(
+            self.workspace_key,
+            entry.entry_id,
             start,
             length,
         )
+
+    def _full_remote_path(self, remote_path: str) -> str:
+        path = remote_path.replace("\\", "/").strip("/")
+        return f"{self._target_path}/{path}" if self._target_path else path
+
+    def _ensure_folder(self, remote_dir: str) -> str:
+        relative = remote_dir.replace("\\", "/").strip("/")
+        if not relative:
+            return self._folder_ids.get("", "")
+        cached = self._folder_ids.get(relative)
+        if cached:
+            return cached
+        parent_id = self._folder_ids.get("", "")
+        current = ""
+        for part in relative.split("/"):
+            if not part:
+                continue
+            current = f"{current}/{part}" if current else part
+            existing = self._folder_ids.get(current)
+            if existing:
+                parent_id = existing
+                continue
+            full_path = self._full_remote_path(current)
+            try:
+                entry = self.api.create_folder(
+                    self.workspace_key,
+                    part,
+                    parent_id or None,
+                )
+            except TarkleApiError as exc:
+                if exc.code != "name_taken":
+                    raise
+                entry = self.api.get_by_path(
+                    self.workspace_key,
+                    full_path,
+                )
+                if entry.get("type") != "folder":
+                    raise SyncError(
+                        f"Remote-Pfad ist keine Ordner: {full_path}"
+                    ) from exc
+            parent_id = str(entry.get("id") or "")
+            self._folder_ids[current] = parent_id
+            self._items[parent_id] = entry
+        return parent_id
 
     def upload(
         self,
@@ -165,74 +152,81 @@ class TarkleRemote:
         *,
         mtime: float | None = None,
         remote_entry: RemoteEntry | None = None,
+        crypto_generation: int = 0,
     ) -> RemoteEntry:
-        existing = self._items.get(remote_entry.entry_id) if remote_entry else None
-        full_path = f"{self._target_path}/{remote_path}" if self._target_path else remote_path
-        if existing is not None:
-            try:
-                item = self.web.update_file(existing, local_path, self.settings.workspace_id)
-            except WebApiError as exc:
-                if "Pro feature" not in str(exc) and "402" not in str(exc):
-                    raise
-                # Free-Plan: keine Dateiversionen. Alte Fassung in den
-                # Papierkorb legen und die neue unter demselben Namen hochladen.
-                self.web.move_to_bin(existing)
-                self._items.pop(remote_entry.entry_id, None)
-                item = self.web.upload_file(local_path, full_path, self.settings.workspace_id)
+        remote = str(PurePosixPath(remote_path.replace("\\", "/")))
+        relative_parent = str(PurePosixPath(remote).parent)
+        if relative_parent == ".":
+            relative_parent = ""
+        if remote_entry is not None and remote_entry.parent_id:
+            folder_id = remote_entry.parent_id
         else:
-            item = self.web.upload_file(local_path, full_path, self.settings.workspace_id)
-        entry_id = str(item.get("id", remote_entry.entry_id if remote_entry else ""))
+            folder_id = self._ensure_folder(relative_parent)
+        full_path = self._full_remote_path(remote)
+        item = self.api.upload_file(
+            self.workspace_key,
+            local_path,
+            full_path,
+            folder_id=folder_id or None,
+            modified_at=mtime,
+            existing_entry_id=(
+                remote_entry.entry_id if remote_entry is not None else None
+            ),
+        )
+        entry_id = str(item.get("id") or "")
         if entry_id:
             self._items[entry_id] = item
-        # Die Zeitstempel der Web-App sind nicht einheitlich formatiert. Ein
-        # mtime-Wert von 0 bedeutet für die Sync-Engine "nicht vergleichen";
-        # Größe und Datei-ID werden weiterhin geprüft.
+        if item.get("type") == "folder":
+            raise TarkleApiError(f"Upload lieferte einen Ordner: {remote}")
         return RemoteEntry(
             path=remote_path,
             kind="file",
             size=int(item.get("size") or local_path.stat().st_size),
+            # 0 bedeutet für die Sync-Engine "nicht vergleichen"; Inhalte
+            # werden über Größe und SHA-256 erkannt.
             mtime=0.0,
             entry_id=entry_id,
-            parent_id=str(item.get("folder_id") or ""),
+            content_hash=str(item.get("sha256") or ""),
+            parent_id=str(item.get("parent_id") or folder_id or ""),
         )
 
     def delete(self, entry: RemoteEntry) -> None:
-        item = self._find_item(entry)
-        self.web.move_to_bin(item)
+        if not entry.entry_id:
+            raise SyncError(f"Remote-Eintrag ohne ID: {entry.path}")
+        self.api.delete_file(self.workspace_key, entry.entry_id)
         self._items.pop(entry.entry_id, None)
+        self._folder_ids.pop(entry.path, None)
 
-    def create_folder(self, remote_path: str) -> RemoteEntry | None:
-        # Leere Ordner legt die Web-API nicht direkt an. Sobald eine Datei
-        # darin hochgeladen wird, erzeugt /api/presign-folder den Ordner.
-        return RemoteEntry(path=remote_path, kind="dir", entry_id="")
+    def create_folder(self, remote_path: str) -> RemoteEntry:
+        entry_id = self._ensure_folder(remote_path)
+        relative = remote_path.replace("\\", "/").strip("/")
+        parent = str(PurePosixPath(relative).parent)
+        if parent == ".":
+            parent = ""
+        return RemoteEntry(
+            path=remote_path,
+            kind="dir",
+            entry_id=entry_id,
+            parent_id=self._folder_ids.get(parent, ""),
+        )
 
 
-def probe_web_api(settings: Settings, token: Token) -> dict[str, Any]:
-    """Prüft die Web-API-Anbindung und zeigt die Token-Claims (ohne Token)."""
-    from .auth import jwt_claims
-
-    claims = jwt_claims(token.access_token)
-    results: dict[str, Any] = {
-        "token": {
-            "kind": "jwt" if claims else "opaque",
-            "aud": claims.get("aud"),
-            "role": claims.get("role"),
-            "email": claims.get("email"),
-            "exp": claims.get("exp"),
-        }
-    }
-    web = None
+def probe_api(settings: Settings, api_key: str) -> dict[str, Any]:
+    """Prüft API-Key, Workspaces und Speicherplatz ohne den Key auszugeben."""
+    api = TarkleApi(api_key)
     try:
-        web = TarkleWeb(settings, token)
-        results["cookie_auth"] = True
-        if settings.workspace_id:
-            items = web.search_files(settings.workspace_id, page_size=5)
-            results["search_files"] = {"status": 200, "items": len(items)}
-        results["download"] = "available"
-    except Exception as exc:  # noqa: BLE001 - Diagnose
-        results["cookie_auth"] = False
-        results["error"] = str(exc)
+        workspaces = api.list_workspaces()
+        report: dict[str, Any] = {"workspaces": workspaces}
+        usage: dict[str, dict[str, Any]] = {}
+        for workspace in workspaces:
+            key = str(workspace.get("workspace_key") or "")
+            if not key:
+                continue
+            try:
+                usage[str(workspace.get("name") or key)] = api.usage(key)
+            except TarkleApiError as exc:
+                usage[str(workspace.get("name") or key)] = {"error": str(exc)}
+        report["usage"] = usage
+        return report
     finally:
-        if web is not None:
-            web.close()
-    return results
+        api.close()

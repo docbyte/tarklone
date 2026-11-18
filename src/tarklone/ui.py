@@ -9,13 +9,22 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
+from uuid import uuid4
 
 from . import __version__
-from .auth import OAuthClient, Token, TokenStore
+from .api import TarkleApi
+from .auth import (
+    ApiKeyStore,
+    clear_legacy_oauth_token,
+    mask_api_key,
+)
 from .config import (
     Settings,
+    SyncFolder,
     SyncProfile,
     crypto_keyring_username,
+    is_api_key,
+    normalize_api_key,
     save_settings,
 )
 from .crypto import CryptoError, EncryptionManager
@@ -83,9 +92,22 @@ class WorkspaceTab(tk.Frame):
         self.folder_var = tk.StringVar(value=profile.remote_folder_id)
         self.interval_var = tk.IntVar(value=profile.sync_interval_seconds)
         self.deletions_var = tk.BooleanVar(value=profile.sync_deletions)
+        self.multi_var = tk.BooleanVar(value=profile.sync_mode == "multi")
+        self.folders: list[SyncFolder] = [
+            SyncFolder(
+                id=folder.id,
+                local_folder=folder.local_folder,
+                remote_folder_id=folder.remote_folder_id,
+            )
+            for folder in profile.folders
+        ]
+        self._selected_folder_id = ""
         self.storage_value_var = tk.StringVar(value="Noch nicht geladen.")
+        self.encryption_target_var = tk.StringVar(value="")
         self._build()
         self.local_var.trace_add("write", self._on_local_changed)
+        self.multi_var.trace_add("write", self._on_mode_changed)
+        self._refresh_sync_mode()
         self.refresh_encryption()
 
     def _build(self) -> None:
@@ -98,15 +120,29 @@ class WorkspaceTab(tk.Frame):
         sync_inner.pack(fill="x")
         sync_inner.columnconfigure(1, weight=1)
 
-        tk.Label(
+        self.multi_check = ttk.Checkbutton(
             sync_inner,
+            text="Mehrere lokale Ordner synchronisieren",
+            variable=self.multi_var,
+        )
+        self.multi_check.grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        )
+
+        self.single_frame = tk.Frame(sync_inner, bg=CARD)
+        self.single_frame.grid(
+            row=1, column=0, columnspan=2, sticky="ew"
+        )
+        self.single_frame.columnconfigure(1, weight=1)
+        tk.Label(
+            self.single_frame,
             text="Lokaler Ordner",
             bg=CARD,
             fg=TEXT,
             font=("Segoe UI", 9),
             anchor="w",
         ).grid(row=0, column=0, sticky="w", pady=(0, 6))
-        local_row = tk.Frame(sync_inner, bg=CARD)
+        local_row = tk.Frame(self.single_frame, bg=CARD)
         local_row.grid(row=0, column=1, sticky="ew", padx=(12, 0), pady=(0, 6))
         local_row.columnconfigure(0, weight=1)
         self.local_entry = ttk.Entry(local_row, textvariable=self.local_var)
@@ -119,24 +155,90 @@ class WorkspaceTab(tk.Frame):
         ).grid(row=0, column=1, padx=(8, 0))
 
         tk.Label(
-            sync_inner,
+            self.single_frame,
             text="Remote-Ordner (Pfad)",
             bg=CARD,
             fg=TEXT,
             font=("Segoe UI", 9),
             anchor="w",
         ).grid(row=1, column=0, sticky="w", pady=(0, 6))
-        ttk.Entry(sync_inner, textvariable=self.folder_var).grid(
+        ttk.Entry(self.single_frame, textvariable=self.folder_var).grid(
             row=1, column=1, sticky="ew", padx=(12, 0), pady=(0, 6)
         )
         tk.Label(
-            sync_inner,
+            self.single_frame,
             text="Leer = Workspace-Root, z. B. Kunden/Projekt",
             bg=CARD,
             fg=MUTED,
             font=("Segoe UI", 8),
             anchor="w",
         ).grid(row=2, column=1, sticky="w", padx=(12, 0), pady=(0, 7))
+
+        self.multi_frame = tk.Frame(sync_inner, bg=CARD)
+        self.multi_frame.grid(
+            row=1, column=0, columnspan=2, sticky="ew"
+        )
+        self.multi_frame.columnconfigure(0, weight=1)
+        tk.Label(
+            self.multi_frame,
+            text="Lokale Ordner und ihre Remote-Ordner im Workspace",
+            bg=CARD,
+            fg=TEXT,
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 5))
+        mapping_wrap = tk.Frame(self.multi_frame, bg=CARD)
+        mapping_wrap.grid(row=1, column=0, sticky="ew")
+        mapping_wrap.columnconfigure(0, weight=1)
+        self.mapping_tree = ttk.Treeview(
+            mapping_wrap,
+            columns=("local", "remote"),
+            show="headings",
+            height=4,
+            selectmode="browse",
+        )
+        self.mapping_tree.heading("local", text="Lokaler Ordner")
+        self.mapping_tree.heading("remote", text="Workspace-Ordner")
+        self.mapping_tree.column("local", width=310, stretch=True)
+        self.mapping_tree.column("remote", width=210, stretch=True)
+        self.mapping_tree.grid(row=0, column=0, sticky="ew")
+        mapping_scroll = ttk.Scrollbar(
+            mapping_wrap,
+            orient="vertical",
+            command=self.mapping_tree.yview,
+        )
+        mapping_scroll.grid(row=0, column=1, sticky="ns")
+        self.mapping_tree.configure(yscrollcommand=mapping_scroll.set)
+        self.mapping_tree.bind("<<TreeviewSelect>>", self._on_mapping_select)
+        self.mapping_tree.bind("<Double-1>", lambda _event: self._edit_mapping())
+        mapping_buttons = tk.Frame(self.multi_frame, bg=CARD)
+        mapping_buttons.grid(row=2, column=0, sticky="w", pady=(6, 4))
+        ttk.Button(
+            mapping_buttons,
+            text="Ordner hinzufügen …",
+            command=self._add_mapping,
+        ).pack(side="left")
+        ttk.Button(
+            mapping_buttons,
+            text="Remote ändern …",
+            command=self._edit_mapping,
+        ).pack(side="left", padx=(6, 0))
+        ttk.Button(
+            mapping_buttons,
+            text="Entfernen",
+            command=self._remove_mapping,
+        ).pack(side="left", padx=(6, 0))
+        tk.Label(
+            self.multi_frame,
+            text="Jeder lokale Ordner wird auf den angegebenen Ordner im "
+            "Workspace abgebildet. Leerer Remote-Pfad = Workspace-Root.",
+            bg=CARD,
+            fg=MUTED,
+            font=("Segoe UI", 8),
+            wraplength=540,
+            justify="left",
+            anchor="w",
+        ).grid(row=3, column=0, sticky="w", pady=(0, 5))
 
         tk.Label(
             sync_inner,
@@ -145,7 +247,7 @@ class WorkspaceTab(tk.Frame):
             fg=TEXT,
             font=("Segoe UI", 9),
             anchor="w",
-        ).grid(row=3, column=0, sticky="w", pady=(0, 6))
+        ).grid(row=2, column=0, sticky="w", pady=(0, 6))
         self.interval_spin = ttk.Spinbox(
             sync_inner,
             from_=15,
@@ -155,7 +257,7 @@ class WorkspaceTab(tk.Frame):
             width=8,
         )
         self.interval_spin.grid(
-            row=3, column=1, sticky="w", padx=(12, 0), pady=(0, 6)
+            row=2, column=1, sticky="w", padx=(12, 0), pady=(0, 6)
         )
 
         self.deletions_check = ttk.Checkbutton(
@@ -164,7 +266,7 @@ class WorkspaceTab(tk.Frame):
             variable=self.deletions_var,
         )
         self.deletions_check.grid(
-            row=4, column=1, sticky="w", padx=(12, 0), pady=(0, 2)
+            row=3, column=1, sticky="w", padx=(12, 0), pady=(0, 2)
         )
         tk.Label(
             sync_inner,
@@ -177,12 +279,22 @@ class WorkspaceTab(tk.Frame):
             wraplength=500,
             justify="left",
             anchor="w",
-        ).grid(row=5, column=1, sticky="w", padx=(12, 0))
+        ).grid(row=4, column=1, sticky="w", padx=(12, 0))
 
         encryption_box = _section(outer, "Verschlüsselung")
         encryption_box.pack(fill="x", pady=(0, 10))
         encryption_inner = tk.Frame(encryption_box, bg=CARD)
         encryption_inner.pack(fill="x")
+        tk.Label(
+            encryption_box,
+            textvariable=self.encryption_target_var,
+            bg=CARD,
+            fg=MUTED,
+            font=("Segoe UI", 8),
+            anchor="w",
+            justify="left",
+            wraplength=540,
+        ).pack(fill="x", pady=(0, 5))
         self.encryption_status_label = tk.Label(
             encryption_inner,
             text="",
@@ -257,23 +369,230 @@ class WorkspaceTab(tk.Frame):
         )
         self.storage_bar.pack(fill="x")
 
+    def _on_mode_changed(self, *_args) -> None:
+        if self.multi_var.get():
+            if not self.folders:
+                local_folder = self.local_var.get().strip()
+                if local_folder:
+                    remote = (
+                        self.folder_var.get().strip().replace("\\", "/").strip("/")
+                        or Path(local_folder).name
+                    )
+                    self.folders.append(
+                        SyncFolder(
+                            id=self.profile.id,
+                            local_folder=local_folder,
+                            remote_folder_id=remote,
+                        )
+                    )
+            self._refresh_mapping_tree()
+        else:
+            selected = self._selected_folder()
+            if selected is not None:
+                self.local_var.set(selected.local_folder)
+                self.folder_var.set(selected.remote_folder_id)
+        self._refresh_sync_mode()
+
+    def _refresh_sync_mode(self) -> None:
+        if self.multi_var.get():
+            self.single_frame.grid_remove()
+            self.multi_frame.grid()
+            self._refresh_mapping_tree()
+        else:
+            self.multi_frame.grid_remove()
+            self.single_frame.grid()
+        self._sync_profile_folders()
+        self.refresh_encryption()
+
+    def _sync_profile_folders(self) -> None:
+        self.profile.sync_mode = "multi" if self.multi_var.get() else "single"
+        self.profile.folders = [
+            SyncFolder(
+                id=folder.id,
+                local_folder=folder.local_folder.strip(),
+                remote_folder_id=folder.remote_folder_id.replace("\\", "/").strip("/"),
+            )
+            for folder in self.folders
+        ]
+        if self.profile.sync_mode == "multi":
+            first = next(
+                (folder for folder in self.profile.folders if folder.local_folder),
+                None,
+            )
+            if first is not None:
+                self.profile.local_folder = first.local_folder
+                self.profile.remote_folder_id = first.remote_folder_id
+            self.profile.enabled = bool(
+                self.profile.workspace_id and self.profile.folders
+            )
+        else:
+            self.profile.enabled = bool(
+                self.local_var.get().strip() and self.profile.workspace_id
+            )
+
+    def _refresh_mapping_tree(self) -> None:
+        if not hasattr(self, "mapping_tree"):
+            return
+        selected = self._selected_folder_id
+        self.mapping_tree.delete(*self.mapping_tree.get_children())
+        for folder in self.folders:
+            self.mapping_tree.insert(
+                "",
+                "end",
+                iid=folder.id,
+                values=(
+                    folder.local_folder,
+                    folder.remote_folder_id or "(Workspace-Root)",
+                ),
+            )
+        children = self.mapping_tree.get_children()
+        if selected not in children:
+            selected = children[0] if children else ""
+        self._selected_folder_id = selected
+        if selected:
+            self.mapping_tree.selection_set(selected)
+            self.mapping_tree.focus(selected)
+
+    def _selected_folder(self) -> SyncFolder | None:
+        if not self._selected_folder_id:
+            return None
+        return next(
+            (
+                folder
+                for folder in self.folders
+                if folder.id == self._selected_folder_id
+            ),
+            None,
+        )
+
+    def _current_folder(self) -> SyncFolder | None:
+        if self.multi_var.get():
+            return self._selected_folder()
+        local_folder = self.local_var.get().strip()
+        if not local_folder:
+            return None
+        return SyncFolder(
+            id=self.profile.id,
+            local_folder=local_folder,
+            remote_folder_id=(
+                self.folder_var.get().strip().replace("\\", "/").strip("/")
+            ),
+        )
+
+    def _current_local_folder(self) -> str:
+        folder = self._current_folder()
+        return folder.local_folder if folder is not None else ""
+
+    def _on_mapping_select(self, *_args) -> None:
+        selection = self.mapping_tree.selection()
+        self._selected_folder_id = selection[0] if selection else ""
+        self._sync_profile_folders()
+        self.refresh_encryption()
+
+    def _add_mapping(self) -> None:
+        selected = filedialog.askdirectory(
+            parent=self,
+            title="Lokalen Ordner für Multi-Ordner-Sync auswählen",
+            initialdir=self._current_local_folder() or str(Path.home()),
+        )
+        if not selected:
+            return
+        if any(
+            Path(folder.local_folder).resolve() == Path(selected).resolve()
+            for folder in self.folders
+        ):
+            messagebox.showwarning(
+                "Multi-Ordner-Sync",
+                "Dieser lokale Ordner ist bereits vorhanden.",
+                parent=self,
+            )
+            return
+        remote = simpledialog.askstring(
+            "Remote-Ordner",
+            "Pfad im Tarkle-Workspace (leer = Workspace-Root):",
+            initialvalue=Path(selected).name,
+            parent=self,
+        )
+        if remote is None:
+            return
+        folder = SyncFolder(
+            id=uuid4().hex,
+            local_folder=selected,
+            remote_folder_id=remote.replace("\\", "/").strip("/"),
+        )
+        self.folders.append(folder)
+        self._selected_folder_id = folder.id
+        self._sync_profile_folders()
+        self._refresh_mapping_tree()
+        self.refresh_encryption()
+
+    def _edit_mapping(self) -> None:
+        folder = self._selected_folder()
+        if folder is None:
+            messagebox.showinfo(
+                "Multi-Ordner-Sync",
+                "Bitte zuerst einen Ordner auswählen.",
+                parent=self,
+            )
+            return
+        remote = simpledialog.askstring(
+            "Remote-Ordner ändern",
+            "Pfad im Tarkle-Workspace (leer = Workspace-Root):",
+            initialvalue=folder.remote_folder_id,
+            parent=self,
+        )
+        if remote is None:
+            return
+        folder.remote_folder_id = remote.replace("\\", "/").strip("/")
+        self._sync_profile_folders()
+        self._refresh_mapping_tree()
+        self.refresh_encryption()
+
+    def _remove_mapping(self) -> None:
+        folder = self._selected_folder()
+        if folder is None:
+            return
+        if not messagebox.askyesno(
+            "Ordner entfernen",
+            f"Mapping für „{folder.local_folder}“ entfernen?\n\n"
+            "Die Dateien selbst werden nicht gelöscht.",
+            parent=self,
+        ):
+            return
+        self.folders = [item for item in self.folders if item.id != folder.id]
+        self._selected_folder_id = ""
+        self._sync_profile_folders()
+        self._refresh_mapping_tree()
+        self.refresh_encryption()
+
     def _on_local_changed(self, *_args) -> None:
+        if self.multi_var.get():
+            return
         local_folder = self.local_var.get().strip()
         self.profile.local_folder = local_folder
         self.profile.enabled = bool(local_folder and self.profile.workspace_id)
         self.refresh_encryption()
 
     def collect(self) -> None:
-        self.profile.local_folder = self.local_var.get().strip()
-        self.profile.remote_folder_id = (
-            self.folder_var.get().strip().replace("\\", "/").strip("/")
-        )
         try:
             interval = int(self.interval_var.get() or 60)
         except (TypeError, ValueError, tk.TclError):
             interval = 60
         self.profile.sync_interval_seconds = max(15, interval)
         self.profile.sync_deletions = bool(self.deletions_var.get())
+        self.profile.sync_mode = "multi" if self.multi_var.get() else "single"
+        if self.profile.sync_mode == "multi":
+            self._sync_profile_folders()
+            self.profile.enabled = bool(
+                self.profile.workspace_id
+                and any(folder.local_folder for folder in self.folders)
+            )
+            return
+        self.profile.local_folder = self.local_var.get().strip()
+        self.profile.remote_folder_id = (
+            self.folder_var.get().strip().replace("\\", "/").strip("/")
+        )
+        self._sync_profile_folders()
         self.profile.enabled = bool(
             self.profile.local_folder and self.profile.workspace_id
         )
@@ -290,18 +609,35 @@ class WorkspaceTab(tk.Frame):
     # --- Verschlüsselung -------------------------------------------------
 
     def refresh_encryption(self) -> None:
-        manager = self.dialog.encryption_manager(
-            self.profile, self.local_var.get().strip()
-        )
+        folder = self._current_folder()
+        local = folder.local_folder if folder is not None else ""
+        if folder is not None:
+            self.encryption_target_var.set(
+                "Ausgewählter Ordner: "
+                f"{folder.local_folder} → "
+                f"{folder.remote_folder_id or 'Workspace-Root'}"
+            )
+        elif self.multi_var.get():
+            self.encryption_target_var.set(
+                "Bitte zuerst im Sync-Abschnitt einen lokalen Ordner auswählen."
+            )
+        else:
+            self.encryption_target_var.set(
+                "Noch kein lokaler Ordner für die Verschlüsselung ausgewählt."
+            )
+        manager = self.dialog.encryption_manager(self.profile, local)
         self.lock_button.pack_forget()
         if manager is None:
-            local = self.local_var.get().strip()
             if not local:
-                text = "Lokalen Ordner auswählen."
+                text = (
+                    "Bitte zuerst einen Ordner auswählen."
+                    if self.multi_var.get()
+                    else "Lokalen Ordner auswählen."
+                )
             elif not Path(local).is_dir():
                 text = "Lokaler Ordner nicht gefunden."
             else:
-                text = "Bitte bei Tarkle anmelden."
+                text = "Bitte einen Tarkle-API-Key speichern."
             self.encryption_status_label.config(text=text)
             self.encryption_button.config(state="disabled")
             self.danger_frame.pack_forget()
@@ -325,7 +661,7 @@ class WorkspaceTab(tk.Frame):
 
     def _manager(self) -> EncryptionManager | None:
         manager = self.dialog.encryption_manager(
-            self.profile, self.local_var.get().strip()
+            self.profile, self._current_local_folder()
         )
         if manager is None:
             messagebox.showwarning(
@@ -466,9 +802,9 @@ class WorkspaceTab(tk.Frame):
         self.refresh_encryption()
 
     def _reset_encryption_key(self) -> None:
-        manager = self.dialog.encryption_manager(
-            self.profile, self.local_var.get().strip()
-        )
+        folder = self._current_folder()
+        local_folder = folder.local_folder if folder is not None else ""
+        manager = self.dialog.encryption_manager(self.profile, local_folder)
         if manager is None or not manager.enabled:
             return
         answer = simpledialog.askstring(
@@ -492,11 +828,14 @@ class WorkspaceTab(tk.Frame):
         self.danger_button.config(state="disabled", text="Lösche …")
         self.encryption_status_label.config(text="Lösche verschlüsselte Daten …")
         profile = self.profile
+        selected_folder = folder
 
         def worker() -> None:
             try:
                 if self.dialog.on_reset_encryption is not None:
-                    ok, message = self.dialog.on_reset_encryption(profile)
+                    ok, message = self.dialog.on_reset_encryption(
+                        profile, selected_folder
+                    )
                 else:
                     manager.reset_key()
                     ok, message = True, "Schlüssel gelöscht."
@@ -565,7 +904,9 @@ class SetupDialog(tk.Toplevel):
         *,
         first_run: bool = False,
         on_cancel: Callable[[], None] | None = None,
-        on_reset_encryption: Callable[[SyncProfile], tuple[bool, str]] | None = None,
+        on_reset_encryption: (
+            Callable[[SyncProfile, SyncFolder | None], tuple[bool, str]] | None
+        ) = None,
     ):
         super().__init__(master)
         self.settings = copy.deepcopy(settings)
@@ -576,10 +917,11 @@ class SetupDialog(tk.Toplevel):
         self.on_reset_encryption = on_reset_encryption
         self.first_run = first_run
         self._closed = False
-        self._login_running = False
+        self._api_key_running = False
         self._update_running = False
         self._workspaces_loading = False
         self._workspace_load_attempted = False
+        self._workspaces_loaded_ok = False
         self._workspaces_by_id: dict[str, str] = {}
         self._selected_profile_id = ""
         self._tabs: dict[str, WorkspaceTab] = {}
@@ -593,6 +935,7 @@ class SetupDialog(tk.Toplevel):
 
         self.start_minimized_var = tk.BooleanVar(value=settings.start_minimized)
         self.launch_var = tk.BooleanVar(value=settings.launch_at_login)
+        self.api_key_var = tk.StringVar(value=ApiKeyStore().load() or "")
         self.update_days_var = tk.StringVar(
             value=self._update_days_label(settings.update_check_interval_days)
         )
@@ -669,8 +1012,10 @@ class SetupDialog(tk.Toplevel):
         login_box.pack(fill="x", pady=(0, 12))
         login_inner = tk.Frame(login_box, bg=CARD)
         login_inner.pack(fill="x", padx=14, pady=9)
+        login_top = tk.Frame(login_inner, bg=CARD)
+        login_top.pack(fill="x")
         self.login_status = tk.Label(
-            login_inner,
+            login_top,
             text="",
             bg=CARD,
             fg=TEXT,
@@ -679,19 +1024,51 @@ class SetupDialog(tk.Toplevel):
             justify="left",
         )
         self.login_status.pack(side="left", fill="x", expand=True)
-        self.login_button = ttk.Button(
-            login_inner,
-            text="Anmelden …",
-            command=self._login_async,
+        self.api_key_button = ttk.Button(
+            login_top,
+            text="Key speichern",
+            command=self._save_api_key_async,
             width=14,
         )
-        self.login_button.pack(side="right")
+        self.api_key_button.pack(side="right")
         self.logout_button = ttk.Button(
-            login_inner,
-            text="Abmelden",
-            command=self._logout,
-            width=10,
+            login_top,
+            text="Key entfernen",
+            command=self._remove_api_key,
+            width=13,
         )
+        key_row = tk.Frame(login_inner, bg=CARD)
+        key_row.pack(fill="x", pady=(8, 0))
+        tk.Label(
+            key_row,
+            text="API-Key",
+            bg=CARD,
+            fg=TEXT,
+            font=("Segoe UI", 9),
+            width=8,
+            anchor="w",
+        ).pack(side="left")
+        self.api_key_entry = ttk.Entry(
+            key_row,
+            textvariable=self.api_key_var,
+            show="•",
+        )
+        self.api_key_entry.pack(side="left", fill="x", expand=True)
+        self.api_key_entry.bind("<Return>", lambda _event: self._save_api_key_async())
+        tk.Label(
+            login_inner,
+            text=(
+                "Key erstellen unter tarkle.com → Einstellungen → API → Create. "
+                "Der Key beginnt mit tk_ und wird nur einmal angezeigt. "
+                "Er wird im Windows Credential Manager gespeichert."
+            ),
+            bg=CARD,
+            fg=MUTED,
+            font=("Segoe UI", 8),
+            wraplength=560,
+            justify="left",
+            anchor="w",
+        ).pack(fill="x", pady=(5, 0))
 
         self.notebook = ttk.Notebook(outer)
         self.notebook.pack(fill="both", expand=True)
@@ -757,7 +1134,7 @@ class SetupDialog(tk.Toplevel):
         if sys.platform == "win32":
             ttk.Checkbutton(
                 inner,
-                text="Beim Windows-Login automatisch starten",
+                text="Beim Windows-Start automatisch starten",
                 variable=self.launch_var,
             ).pack(anchor="w", pady=(2, 0))
 
@@ -818,7 +1195,7 @@ class SetupDialog(tk.Toplevel):
                 wraplength=520,
                 justify="center",
             ).pack(expand=True, pady=(48, 10))
-            if show_load and TokenStore().load() is not None:
+            if show_load and ApiKeyStore().load() is not None:
                 ttk.Button(
                     frame,
                     text="Workspaces laden",
@@ -841,9 +1218,9 @@ class SetupDialog(tk.Toplevel):
 
     def _rebuild_tabs(self) -> None:
         self._clear_tabs()
-        if TokenStore().load() is None:
+        if ApiKeyStore().load() is None:
             self._show_placeholder(
-                "Bitte bei Tarkle anmelden, um Workspaces zu konfigurieren."
+                "API-Key eintragen, um die Tarkle-Workspaces zu laden."
             )
             return
         for profile in self._profiles:
@@ -859,7 +1236,7 @@ class SetupDialog(tk.Toplevel):
                 (
                     profile.id
                     for profile in self._profiles
-                    if profile.enabled and profile.local_folder
+                    if profile.enabled and profile.active_folders()
                 ),
                 self._profiles[0].id,
             )
@@ -889,41 +1266,143 @@ class SetupDialog(tk.Toplevel):
             tab.refresh_encryption()
             tab.refresh_storage()
 
-    # --- Login / Workspaces ---------------------------------------------
+    # --- API-Key / Workspaces -------------------------------------------
 
     def _refresh_login_state(self) -> None:
-        token = TokenStore().load()
-        if token:
+        key = ApiKeyStore().load()
+        if key:
+            self.api_key_var.set(key)
             self.login_status.config(
-                text=f"Angemeldet als {token.email or 'Tarkle-Konto'}"
+                text=f"API-Key gespeichert ({mask_api_key(key)})."
             )
-            self.login_button.pack_forget()
-            self.logout_button.pack(side="right")
+            self.logout_button.pack(side="right", padx=(0, 6))
+            self.api_key_button.config(state="normal", text="Key aktualisieren")
             if not self._tabs:
                 self._rebuild_tabs()
             if not self._workspace_load_attempted:
                 self._workspace_load_attempted = True
                 self.after(200, self._load_workspaces)
         else:
-            self.login_status.config(text="Noch nicht bei Tarkle angemeldet.")
+            self.login_status.config(text="Noch kein Tarkle-API-Key gespeichert.")
             self.logout_button.pack_forget()
-            self.login_button.pack(side="right")
-            self.login_button.config(state="normal")
+            self.api_key_button.config(state="normal", text="Key speichern")
             self._clear_tabs()
             self._show_placeholder(
-                "Bitte bei Tarkle anmelden, um Workspaces zu konfigurieren."
+                "API-Key eintragen, um die Tarkle-Workspaces zu laden."
             )
             self._storage_cache.clear()
             self._storage_loading.clear()
 
+    def _save_api_key_async(self) -> None:
+        if self._api_key_running:
+            return
+        key = normalize_api_key(self.api_key_var.get())
+        if not is_api_key(key):
+            messagebox.showwarning(
+                "Tarkle-API-Key",
+                "Bitte einen gültigen API-Key eintragen. Er beginnt mit tk_ "
+                "und wird in Tarkle unter Einstellungen → API erstellt.",
+                parent=self,
+            )
+            return
+        self._api_key_running = True
+        self.api_key_button.config(state="disabled", text="Prüfe …")
+        self.login_status.config(text="Prüfe API-Key bei Tarkle …")
+
+        def worker() -> None:
+            api = None
+            try:
+                api = TarkleApi(key)
+                workspaces = api.list_workspaces()
+            except Exception as exc:  # noqa: BLE001 - im UI anzeigen
+                error = exc
+                self._ui_queue.put(
+                    lambda error=error, key=key: self._api_key_failed(key, error)
+                )
+            else:
+                self._ui_queue.put(
+                    lambda workspaces=workspaces, key=key: self._api_key_saved(
+                        key, workspaces
+                    )
+                )
+            finally:
+                if api is not None:
+                    api.close()
+
+        threading.Thread(
+            target=worker, name="tarklone-api-key", daemon=True
+        ).start()
+
+    def _api_key_saved(self, key: str, workspaces) -> None:  # noqa: ANN001
+        self._api_key_running = False
+        try:
+            ApiKeyStore().save(key)
+        except Exception as exc:  # noqa: BLE001 - im UI anzeigen
+            self._api_key_failed(key, exc)
+            return
+        clear_legacy_oauth_token()
+        self.api_key_button.config(state="normal", text="Key aktualisieren")
+        self._workspace_load_attempted = True
+        self._storage_cache.clear()
+        self._storage_loading.clear()
+        self._workspaces_loaded(workspaces, None)
+        messagebox.showinfo(
+            "Tarkle-API-Key",
+            f"API-Key gespeichert ({mask_api_key(key)}). "
+            f"{len(workspaces)} Workspace(s) verfügbar.",
+            parent=self,
+        )
+
+    def _api_key_failed(self, key: str, exc: Exception) -> None:
+        self._api_key_running = False
+        self.api_key_button.config(state="normal", text="Key speichern")
+        self.login_status.config(text="API-Key konnte nicht geprüft werden.")
+        messagebox.showerror(
+            "Tarkle-API-Key",
+            f"Der API-Key wurde nicht gespeichert:\n{exc}",
+            parent=self,
+        )
+
+    def _remove_api_key(self) -> None:
+        if not messagebox.askyesno(
+            "API-Key entfernen",
+            "Tarkle-API-Key wirklich vom Gerät entfernen?",
+            parent=self,
+        ):
+            return
+        deleted = ApiKeyStore().delete()
+        if not deleted:
+            messagebox.showerror(
+                "API-Key entfernen",
+                "Der Key konnte nicht zuverlässig aus dem System-Keyring "
+                "entfernt werden. Bitte Credential Manager/Keyring prüfen.",
+                parent=self,
+            )
+            return
+        clear_legacy_oauth_token()
+        self.api_key_var.set("")
+        self._workspaces_by_id.clear()
+        self._workspace_load_attempted = False
+        self._workspaces_loaded_ok = False
+        self._storage_cache.clear()
+        self._storage_loading.clear()
+        self._refresh_login_state()
+        messagebox.showinfo(
+            "API-Key entfernt",
+            "Der Tarkle-API-Key wurde von diesem Gerät entfernt. Die übrigen "
+            "Einstellungen bleiben gespeichert. Zum Widerrufen den Key "
+            "zusätzlich in Tarkle unter Einstellungen → API löschen.",
+            parent=self,
+        )
+
     def _load_workspaces(self) -> None:
         if self._workspaces_loading:
             return
-        token = TokenStore().load()
-        if token is None:
+        key = ApiKeyStore().load()
+        if key is None:
             messagebox.showinfo(
                 "Tarkle-Workspaces",
-                "Bitte zuerst bei Tarkle anmelden.",
+                "Bitte zuerst einen Tarkle-API-Key eintragen.",
                 parent=self,
             )
             return
@@ -931,12 +1410,10 @@ class SetupDialog(tk.Toplevel):
         self.login_status.config(text="Lade Tarkle-Workspaces …")
 
         def worker() -> None:
-            from .tarkle import TarkleRemote
-
-            remote = None
+            api = None
             try:
-                remote = TarkleRemote(self.settings, token)
-                workspaces = remote.list_workspaces()
+                api = TarkleApi(key)
+                workspaces = api.list_workspaces()
             except Exception as exc:  # noqa: BLE001 - im UI anzeigen
                 error = exc
                 self._ui_queue.put(
@@ -949,8 +1426,8 @@ class SetupDialog(tk.Toplevel):
                     )
                 )
             finally:
-                if remote is not None:
-                    remote.close()
+                if api is not None:
+                    api.close()
 
         threading.Thread(
             target=worker, name="tarklone-workspaces", daemon=True
@@ -958,11 +1435,11 @@ class SetupDialog(tk.Toplevel):
 
     def _workspaces_loaded(self, workspaces, error) -> None:  # noqa: ANN001
         self._workspaces_loading = False
-        token = TokenStore().load()
-        if token is None:
+        key = ApiKeyStore().load()
+        if key is None:
             return
         self.login_status.config(
-            text=f"Angemeldet als {token.email or 'Tarkle-Konto'}"
+            text=f"API-Key gespeichert ({mask_api_key(key)})."
         )
         if error:
             if not self._tabs:
@@ -973,28 +1450,64 @@ class SetupDialog(tk.Toplevel):
             messagebox.showerror("Workspaces laden", str(error), parent=self)
             return
 
-        self._workspaces_by_id = {
-            str(item.get("id")): str(item.get("name") or item.get("id"))
-            for item in workspaces
-            if item.get("id")
-        }
+        self._workspaces_loaded_ok = True
+        returned: dict[str, str] = {}
+        for item in workspaces:
+            workspace_key = str(
+                item.get("workspace_key") or item.get("id") or ""
+            )
+            if not workspace_key:
+                continue
+            returned[workspace_key] = str(
+                item.get("name") or workspace_key
+            )
+        self._workspaces_by_id = returned
         existing = {
-            profile.workspace_id: profile for profile in self._profiles
+            profile.workspace_id: profile
+            for profile in self._profiles
+            if profile.workspace_id
         }
-        for workspace_id, name in self._workspaces_by_id.items():
-            profile = existing.get(workspace_id)
+        used_ids = {profile.id for profile in self._profiles}
+        for workspace_key, name in returned.items():
+            profile = existing.get(workspace_key)
             if profile is None:
-                profile = SyncProfile(
-                    id=workspace_id,
-                    workspace_id=workspace_id,
-                    workspace_name=name,
-                    local_folder="",
-                    enabled=False,
+                # Migration alter OAuth-Profile: gleicher Workspace-Name.
+                candidate = next(
+                    (
+                        item
+                        for item in self._profiles
+                        if item.workspace_id not in returned
+                        and item.workspace_name.strip().casefold()
+                        == name.strip().casefold()
+                    ),
+                    None,
                 )
-                self._profiles.append(profile)
-                existing[workspace_id] = profile
+                if candidate is not None:
+                    candidate.workspace_id = workspace_key
+                    candidate.workspace_name = name
+                    profile = candidate
+                else:
+                    profile_id = workspace_key
+                    while profile_id in used_ids:
+                        profile_id = f"{workspace_key}-{uuid4().hex[:6]}"
+                    profile = SyncProfile(
+                        id=profile_id,
+                        workspace_id=workspace_key,
+                        workspace_name=name,
+                        local_folder="",
+                        enabled=False,
+                    )
+                    self._profiles.append(profile)
+                    used_ids.add(profile_id)
             else:
                 profile.workspace_name = name
+            existing[workspace_key] = profile
+
+        # Profile, die der Key nicht mehr erreicht, werden deaktiviert, aber
+        # nicht gelöscht (lokale Ordner und Sync-Zustand bleiben erhalten).
+        for profile in self._profiles:
+            if profile.workspace_id not in returned:
+                profile.enabled = False
 
         if self._placeholder_id:
             self._clear_tabs()
@@ -1006,7 +1519,10 @@ class SetupDialog(tk.Toplevel):
             )
             return
         for profile_id, tab_id in self._tab_ids.items():
-            profile = self.settings.profile(profile_id)
+            profile = next(
+                (item for item in self._profiles if item.id == profile_id),
+                None,
+            )
             if profile is not None:
                 try:
                     self.notebook.tab(
@@ -1019,7 +1535,7 @@ class SetupDialog(tk.Toplevel):
                 (
                     profile.id
                     for profile in self._profiles
-                    if profile.enabled and profile.local_folder
+                    if profile.enabled and profile.active_folders()
                 ),
                 self._profiles[0].id,
             )
@@ -1028,9 +1544,9 @@ class SetupDialog(tk.Toplevel):
     # --- Speicherplatz ---------------------------------------------------
 
     def request_storage(self, tab: WorkspaceTab) -> None:
-        token = TokenStore().load()
-        if token is None:
-            tab.set_storage_message("Nicht angemeldet.")
+        api_key = ApiKeyStore().load()
+        if not api_key:
+            tab.set_storage_message("Kein API-Key gespeichert.")
             return
         workspace_id = tab.profile.workspace_id
         if not workspace_id:
@@ -1047,12 +1563,10 @@ class SetupDialog(tk.Toplevel):
         tab.set_storage_loading()
 
         def worker() -> None:
-            from .webapi import TarkleWeb
-
-            web = None
+            api = None
             try:
-                web = TarkleWeb(self.settings, token)
-                usage = web.storage_usage(workspace_id)
+                api = TarkleApi(api_key)
+                usage = api.usage(workspace_id)
             except Exception as exc:  # noqa: BLE001 - im UI anzeigen
                 error = exc
                 self._ui_queue.put(
@@ -1067,8 +1581,8 @@ class SetupDialog(tk.Toplevel):
                     )
                 )
             finally:
-                if web is not None:
-                    web.close()
+                if api is not None:
+                    api.close()
 
         threading.Thread(
             target=worker, name="tarklone-storage", daemon=True
@@ -1076,10 +1590,10 @@ class SetupDialog(tk.Toplevel):
 
     def _storage_done(self, workspace_id: str, usage, error) -> None:  # noqa: ANN001
         self._storage_loading.discard(workspace_id)
-        if TokenStore().load() is None:
+        if ApiKeyStore().load() is None:
             for tab in self._tabs.values():
                 if tab.profile.workspace_id == workspace_id:
-                    tab.set_storage_message("Nicht angemeldet.")
+                    tab.set_storage_message("Kein API-Key gespeichert.")
             return
         if error is not None:
             for tab in self._tabs.values():
@@ -1099,7 +1613,7 @@ class SetupDialog(tk.Toplevel):
     def encryption_manager(
         self, profile: SyncProfile, local_folder: str
     ) -> EncryptionManager | None:
-        if TokenStore().load() is None:
+        if ApiKeyStore().load() is None:
             return None
         local = local_folder.strip()
         if not local:
@@ -1169,103 +1683,48 @@ class SetupDialog(tk.Toplevel):
         else:
             self.update_status_var.set(f"Aktuell (Version {__version__}).")
 
-    # --- Login -----------------------------------------------------------
-
-    def _login_async(self) -> None:
-        if self._login_running:
-            return
-        self._login_running = True
-        self.login_button.config(state="disabled", text="Browser geöffnet …")
-        self.login_status.config(text="Bitte im Browser bei Tarkle anmelden …")
-
-        def worker() -> None:
-            client = OAuthClient(self.settings)
-            try:
-                token = client.login()
-            except Exception as exc:  # noqa: BLE001 - wird im UI angezeigt
-                error = exc
-                self._ui_queue.put(lambda error=error: self._login_failed(error))
-            else:
-                self._ui_queue.put(lambda token=token: self._login_ok(token))
-            finally:
-                client.close()
-
-        threading.Thread(target=worker, name="tarklone-login", daemon=True).start()
-
-    def _login_ok(self, token: Token) -> None:
-        self._login_running = False
-        self.login_button.config(text="Anmelden …", state="normal")
-        self._workspace_load_attempted = False
-        self._refresh_login_state()
-        messagebox.showinfo(
-            "tarklone",
-            f"Angemeldet als {token.email or 'Tarkle-Konto'}.",
-            parent=self,
-        )
-
-    def _login_failed(self, exc: Exception) -> None:
-        self._login_running = False
-        self.login_button.config(text="Anmelden …", state="normal")
-        self.login_status.config(text="Anmeldung fehlgeschlagen.")
-        messagebox.showerror("Anmeldung fehlgeschlagen", str(exc), parent=self)
-
-    def _logout(self) -> None:
-        if not messagebox.askyesno(
-            "Abmelden",
-            "Tarkle-Anmeldung wirklich entfernen?",
-            parent=self,
-        ):
-            return
-        client = OAuthClient(self.settings)
-        try:
-            local_deleted, remote_revoked = client.logout()
-        finally:
-            client.close()
-        self._workspaces_by_id.clear()
-        self._workspace_load_attempted = False
-        self._refresh_login_state()
-        if not local_deleted:
-            messagebox.showerror(
-                "Abmelden",
-                "Der lokale Token konnte nicht zuverlässig aus dem System-Keyring "
-                "entfernt werden. Bitte Credential Manager/Keyring prüfen.",
-                parent=self,
-            )
-        elif not remote_revoked:
-            messagebox.showwarning(
-                "Abmelden",
-                "Der lokale Token wurde entfernt, aber Tarkle konnte die Sitzung "
-                "nicht widerrufen. Bitte erneut anmelden, wenn du wieder synchronisieren möchtest.",
-                parent=self,
-            )
-
     # --- Speichern -------------------------------------------------------
 
     def _save(self) -> None:
-        if TokenStore().load() is None:
+        # Der Autostart wird sofort übernommen, damit er sich auch dann
+        # entfernen lässt, wenn andere Angaben (noch) unvollständig sind.
+        launch_at_login = bool(self.launch_var.get())
+        apply_launch_at_login(launch_at_login)
+        typed_key = normalize_api_key(self.api_key_var.get())
+        stored_key = ApiKeyStore().load() or ""
+        if typed_key != stored_key:
             messagebox.showwarning(
-                "Einrichtung",
-                "Bitte zuerst bei Tarkle anmelden.",
+                "Tarkle-API-Key",
+                "Der eingegebene API-Key wurde noch nicht gespeichert. Bitte "
+                "zuerst „Key speichern“ wählen oder das Feld leeren und "
+                "„Key entfernen“ verwenden.",
                 parent=self,
             )
             return
         for tab in self._tabs.values():
             tab.collect()
+        if self._workspaces_loaded_ok:
+            for profile in self._profiles:
+                if profile.workspace_id not in self._workspaces_by_id:
+                    profile.enabled = False
         self.settings.profiles = self._profiles
         self.settings.start_minimized = bool(self.start_minimized_var.get())
-        self.settings.launch_at_login = bool(self.launch_var.get())
+        self.settings.launch_at_login = launch_at_login
         self.settings.update_check_interval_days = self._update_days_value()
         self.settings.sync_legacy_fields()
-        errors = self.settings.validation_errors()
-        if errors:
-            messagebox.showwarning(
-                "Einrichtung unvollständig",
-                "\n".join(errors),
-                parent=self,
-            )
-            return
+        if ApiKeyStore().load() is not None:
+            errors = self.settings.validation_errors()
+            if errors:
+                messagebox.showwarning(
+                    "Einrichtung unvollständig",
+                    "\n".join(errors),
+                    parent=self,
+                )
+                return
+        # Ohne API-Key werden die allgemeinen Einstellungen trotzdem
+        # gespeichert. So lässt sich z. B. der Windows-Autostart auch dann
+        # entfernen, wenn gerade kein gültiger Key hinterlegt ist.
         save_settings(self.settings)
-        apply_launch_at_login(self.settings.launch_at_login)
         self._closed = True
         self._release_grab()
         self.destroy()

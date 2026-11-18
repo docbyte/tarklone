@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from platformdirs import user_config_dir, user_data_dir, user_log_dir
 
@@ -26,11 +27,9 @@ DEFAULT_EXCLUDES = [
     "desktop.ini",
 ]
 
-DEFAULT_SERVER_URL = "https://tarkle.com"
-# Die MCP-Beta der Tarkle-Web-App läuft unter dieser Hostname; das OAuth-Token
-# wird mit dieser Audience ausgestellt. mcp.tarkle.com lehnt es ab.
-DEFAULT_MCP_URL = "https://mcp.tarklesend.com/mcp"
-LEGACY_MCP_URL = "https://mcp.tarkle.com/mcp"
+DEFAULT_API_BASE = "https://tarkle.tech/api/v1"
+API_KEY_PREFIX = "tk_"
+_WORKSPACE_KEY_RE = re.compile(r"^[a-z0-9]{8}$")
 
 
 def config_dir() -> Path:
@@ -113,27 +112,46 @@ def _validate_https_endpoint(
     return f"https://{expected_host}{expected_path}"
 
 
-def validate_server_url(value: str) -> str:
-    """Validiert den Ursprung, an den Tarkle-Session-Cookies gesendet werden."""
+def validate_api_base(value: str) -> str:
+    """Validiert die offizielle Tarkle-API-Basis."""
     return _validate_https_endpoint(
         value,
-        expected_host="tarkle.com",
-        expected_path="/",
+        expected_host="tarkle.tech",
+        expected_path="/api/v1",
     )
 
 
-def validate_mcp_url(value: str) -> str:
-    """Validiert den MCP-Endpunkt, an den das OAuth-Bearer-Token gesendet wird."""
-    return _validate_https_endpoint(
-        value,
-        expected_host="mcp.tarklesend.com",
-        expected_path="/mcp",
-    )
+def normalize_api_key(value: str) -> str:
+    key = (value or "").strip().strip('"').strip("'")
+    if key.lower().startswith("bearer "):
+        key = key[7:].strip()
+    return key
+
+
+def is_api_key(value: str) -> bool:
+    key = normalize_api_key(value)
+    return key.startswith(API_KEY_PREFIX) and len(key) >= len(API_KEY_PREFIX) + 8
+
+
+def is_workspace_key(value: str) -> bool:
+    return bool(_WORKSPACE_KEY_RE.fullmatch((value or "").strip()))
+
+
+@dataclass
+class SyncFolder:
+    id: str
+    local_folder: str
+    remote_folder_id: str = ""
+
+    @property
+    def display_name(self) -> str:
+        return self.remote_folder_id or Path(self.local_folder).name or self.local_folder
 
 
 @dataclass
 class SyncProfile:
     id: str
+    # 8-stelliger Workspace-Key der offiziellen Tarkle-API (X-Workspace-Key).
     workspace_id: str
     workspace_name: str = ""
     local_folder: str = ""
@@ -141,10 +159,35 @@ class SyncProfile:
     sync_interval_seconds: int = 60
     sync_deletions: bool = False
     enabled: bool = True
+    sync_mode: str = "single"
+    folders: list[SyncFolder] = field(default_factory=list)
 
     @property
     def display_name(self) -> str:
         return self.workspace_name or self.workspace_id or self.id
+
+    def active_folders(self) -> list[SyncFolder]:
+        if self.sync_mode == "multi":
+            return [
+                folder
+                for folder in self.folders
+                if folder.local_folder.strip()
+            ]
+        if self.local_folder.strip():
+            return [
+                SyncFolder(
+                    id=self.id,
+                    local_folder=self.local_folder,
+                    remote_folder_id=self.remote_folder_id,
+                )
+            ]
+        return []
+
+    def normalized_folders(self) -> list[SyncFolder]:
+        """Returns all mappings that should be persisted for this profile."""
+        if self.sync_mode == "multi":
+            return [folder for folder in self.folders if folder.local_folder.strip()]
+        return self.active_folders()
 
 
 @dataclass
@@ -168,14 +211,6 @@ class Settings:
 
     update_check_interval_days: int = 7
     last_update_check: str = ""
-
-    oauth_client_id: str = ""
-    oauth_redirect_uri: str = ""
-    oauth_redirect_port: int = 53682
-    account_email: str = ""
-
-    server_url: str = DEFAULT_SERVER_URL
-    mcp_url: str = DEFAULT_MCP_URL
 
     def ensure_profiles(self) -> None:
         if self.profiles:
@@ -202,10 +237,14 @@ class Settings:
             (profile for profile in self.profiles if profile.enabled),
             self.profiles[0],
         )
-        self.local_folder = first.local_folder
+        folders = first.active_folders()
+        primary = folders[0] if folders else None
+        self.local_folder = primary.local_folder if primary else first.local_folder
         self.workspace_id = first.workspace_id
         self.workspace_name = first.workspace_name
-        self.remote_folder_id = first.remote_folder_id
+        self.remote_folder_id = (
+            primary.remote_folder_id if primary else first.remote_folder_id
+        )
         self.sync_interval_seconds = first.sync_interval_seconds
         self.sync_deletions = first.sync_deletions
 
@@ -219,8 +258,8 @@ class Settings:
     def is_configured(self) -> bool:
         return any(
             profile.enabled
-            and profile.local_folder
             and profile.workspace_id
+            and profile.active_folders()
             for profile in self.profiles
         )
 
@@ -229,7 +268,7 @@ class Settings:
         return [
             profile
             for profile in self.profiles
-            if profile.enabled and profile.local_folder and profile.workspace_id
+            if profile.enabled and profile.workspace_id and profile.active_folders()
         ]
 
     def validation_errors(self) -> list[str]:
@@ -240,18 +279,56 @@ class Settings:
             errors.append("Kein Workspace-Profil eingerichtet.")
         for profile in active:
             label = profile.display_name
-            if not profile.local_folder:
+            folders = profile.active_folders()
+            if not folders:
                 errors.append(f"[{label}] Kein lokaler Ordner ausgewählt.")
-            elif not Path(profile.local_folder).is_dir():
-                errors.append(
-                    f"[{label}] Lokaler Ordner existiert nicht: {profile.local_folder}"
-                )
             if not profile.workspace_id:
                 errors.append(f"[{label}] Kein Tarkle-Workspace ausgewählt.")
+            elif not is_workspace_key(profile.workspace_id):
+                errors.append(
+                    f"[{label}] Kein gültiger Tarkle-Workspace-Key "
+                    "(8 Zeichen, a–z/0–9)."
+                )
             if profile.sync_interval_seconds < 15:
                 errors.append(
                     f"[{label}] Das Sync-Intervall muss mindestens 15 Sekunden betragen."
                 )
+            seen_local: list[Path] = []
+            seen_remote: list[str] = []
+            for folder in folders:
+                if not Path(folder.local_folder).is_dir():
+                    errors.append(
+                        f"[{label}] Lokaler Ordner existiert nicht: {folder.local_folder}"
+                    )
+                    continue
+                resolved_local = Path(folder.local_folder).resolve()
+                if any(
+                    resolved_local == existing
+                    or resolved_local.is_relative_to(existing)
+                    or existing.is_relative_to(resolved_local)
+                    for existing in seen_local
+                ):
+                    errors.append(
+                        f"[{label}] Lokale Ordner dürfen sich nicht überschneiden: "
+                        f"{folder.local_folder}"
+                    )
+                seen_local.append(resolved_local)
+                remote = folder.remote_folder_id.strip("/")
+                if any(
+                    not remote
+                    or not existing
+                    or remote == existing
+                    or remote.startswith(existing + "/")
+                    or existing.startswith(remote + "/")
+                    for existing in seen_remote
+                ):
+                    errors.append(
+                        f"[{label}] Remote-Ordner dürfen sich nicht überschneiden: "
+                        f"{remote or 'Workspace-Root'}"
+                    )
+                seen_remote.append(remote)
+            if profile.sync_mode not in {"single", "multi"}:
+                errors.append(f"[{label}] Unbekannter Sync-Modus.")
         if self.conflict_policy not in {"copy", "newest"}:
             errors.append("Unbekannte Konfliktstrategie.")
         if self.update_check_interval_days < 0:
@@ -281,6 +358,29 @@ def load_settings(path: Path | None = None) -> Settings:
             if not isinstance(item, dict) or not item.get("workspace_id"):
                 continue
             try:
+                folders: list[SyncFolder] = []
+                raw_folders = item.get("folders", [])
+                if isinstance(raw_folders, list):
+                    for raw_folder in raw_folders:
+                        if not isinstance(raw_folder, dict):
+                            continue
+                        local_folder = str(raw_folder.get("local_folder", ""))
+                        if not local_folder:
+                            continue
+                        folders.append(
+                            SyncFolder(
+                                id=str(
+                                    raw_folder.get("id")
+                                    or f"folder-{uuid4().hex}"
+                                ),
+                                local_folder=local_folder,
+                                remote_folder_id=str(
+                                    raw_folder.get("remote_folder_id", "")
+                                )
+                                .replace("\\", "/")
+                                .strip("/"),
+                            )
+                        )
                 profile = SyncProfile(
                     id=str(item.get("id") or item.get("workspace_id")),
                     workspace_id=str(item["workspace_id"]),
@@ -292,17 +392,19 @@ def load_settings(path: Path | None = None) -> Settings:
                     ),
                     sync_deletions=bool(item.get("sync_deletions", False)),
                     enabled=bool(item.get("enabled", True)),
+                    sync_mode=str(item.get("sync_mode", "single")),
+                    folders=folders,
                 )
             except (TypeError, ValueError):
                 continue
+            if profile.sync_mode not in {"single", "multi"}:
+                profile.sync_mode = "single"
             if any(
                 existing.workspace_id == profile.workspace_id
                 for existing in settings.profiles
             ):
                 continue
             settings.profiles.append(profile)
-    if settings.mcp_url in ("", LEGACY_MCP_URL):
-        settings.mcp_url = DEFAULT_MCP_URL
     settings.ensure_profiles()
     settings.sync_legacy_fields()
     return settings

@@ -54,8 +54,8 @@ einem ZIP-Archiv. Die macOS-Tray-Integration ist derzeit **experimentell**.
 
 ## Reine CLI
 
-Die CLI enthält Login, Sync, Status, Init und Probe; **kein** Tray, kein
-Tkinter und keine GUI-Abhängigkeiten.
+Die CLI enthält API-Key-Verwaltung, Sync, Status, Init und Probe; **kein** Tray,
+kein Tkinter und keine GUI-Abhängigkeiten.
 
 ```bash
 # Linux/macOS
@@ -72,14 +72,16 @@ Beispiele:
 ```bash
 tarklone-cli login
 tarklone-cli status
+tarklone-cli probe
 tarklone-cli sync --dry-run --verbose
 tarklone-cli sync
 ```
 
-Auf headless Linux-Systemen wird der OAuth-Token ohne SecretService als
-Fallback in `token.json` (Dateimodus 0600) gespeichert. Ein Keyring
-(z. B. GNOME Keyring) ist sicherer und wird bevorzugt, ist aber für die CLI
-nicht zwingend erforderlich.
+`login` speichert einen Tarkle-API-Key (`tk_…`) aus **Einstellungen → API**.
+Auf headless Linux-Systemen wird der Key ohne SecretService als Fallback in
+`api-key.json` (Dateimodus 0600) gespeichert. Ein Keyring (z. B. GNOME Keyring)
+ist sicherer und wird bevorzugt, ist aber für die CLI nicht zwingend
+erforderlich.
 
 ## GitHub Actions
 
@@ -90,6 +92,6 @@ GitHub-Release angehängt.
 
 ## Version
 
-Alle Builds bleiben bei **1.3**. Die Version wird zentral aus
+Alle Builds bleiben bei **2.0.0**. Die Version wird zentral aus
 `pyproject.toml`, `src/tarklone/__init__.py` und
 `packaging/version_info.txt` übernommen.
