@@ -504,6 +504,12 @@ class TarkleApi:
         name: str,
         parent_id: str | None = None,
     ) -> dict[str, Any]:
+        if name.startswith("."):
+            raise TarkleApiError(
+                "Die Tarkle-API entfernt führende Punkte aus Ordnernamen. "
+                f"Ordner kann nicht angelegt werden: {name}",
+                code="unsupported_name",
+            )
         body: dict[str, Any] = {"name": name, "visibility": "workspace"}
         if parent_id:
             body["parent_id"] = parent_id
@@ -871,6 +877,12 @@ class TarkleApi:
         name = PurePosixPath(path).name
         if not name:
             raise TarkleApiError("Ungültiger Remote-Dateiname.")
+        if name.startswith("."):
+            raise TarkleApiError(
+                "Die Tarkle-API entfernt führende Punkte aus Dateinamen. "
+                f"Datei kann nicht hochgeladen werden: {path}",
+                code="unsupported_name",
+            )
         size = local_path.stat().st_size
         digest = sha256_file(local_path)
         modified = _iso_mtime(modified_at)

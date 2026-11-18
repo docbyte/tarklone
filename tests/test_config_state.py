@@ -8,6 +8,7 @@ from tarklone.config import (
     SyncProfile,
     crypto_keyring_username,
     load_settings,
+    profile_state_id,
     profile_state_path,
     save_settings,
     validate_api_base,
@@ -157,6 +158,38 @@ def test_profile_paths_are_stable_and_safe() -> None:
     assert first.startswith("crypto-master-ws1abcde-")
     assert first != second
     assert first == crypto_keyring_username("ws1abcde", "C:/sync/a")
+
+
+def test_state_id_changes_with_remote_target() -> None:
+    root = SyncProfile(
+        id="ws1abcde",
+        workspace_id="ws1abcde",
+        local_folder="C:/sync",
+    )
+    custom = SyncProfile(
+        id="ws1abcde",
+        workspace_id="ws1abcde",
+        local_folder="C:/sync",
+        remote_folder_id="tarkle",
+    )
+    assert profile_state_id(root) == "ws1abcde"
+    assert profile_state_id(custom) != profile_state_id(root)
+    assert profile_state_id(custom) == profile_state_id(custom)
+    multi = SyncProfile(
+        id="ws1abcde",
+        workspace_id="ws1abcde",
+        sync_mode="multi",
+        folders=[
+            SyncFolder(
+                id="folder-1",
+                local_folder="C:/sync",
+                remote_folder_id="Team",
+            )
+        ],
+    )
+    assert profile_state_id(multi, multi.folders[0]).startswith(
+        "ws1abcde-folder-1-remote-"
+    )
 
 
 def test_service_endpoints_reject_untrusted_origins() -> None:

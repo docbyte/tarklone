@@ -30,6 +30,7 @@ from .config import (
     is_workspace_key,
     load_settings,
     log_path,
+    profile_state_id,
     profile_state_path,
     save_settings,
     state_path,
@@ -221,11 +222,7 @@ class TarkloneApp:
             if not folders:
                 raise ValueError("Profil hat keinen lokalen Ordner.")
             folder = folders[0]
-        state_id = (
-            profile.id
-            if profile.sync_mode != "multi" or folder.id == profile.id
-            else f"{profile.id}-{folder.id}"
-        )
+        state_id = profile_state_id(profile, folder)
         path = profile_state_path(state_id)
         existing_states = (
             list(path.parent.glob("*.sqlite3")) if path.parent.exists() else []
@@ -975,6 +972,9 @@ class TarkloneApp:
         self._current_profile_id = profile.id
         self._progress = None
         self._last_error = ""
+        # Auch fehlgeschlagene Versuche zählen für das Intervall, damit die
+        # App bei einem Konfigurationsfehler nicht jede Sekunde neu startet.
+        self._last_sync[profile.id] = time.time()
         start_text = (
             f"Synchronisiere {len(folders)} Ordner …"
             if len(folders) > 1

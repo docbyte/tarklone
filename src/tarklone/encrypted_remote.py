@@ -9,6 +9,7 @@ from .crypto import (
     ENCRYPTED_DIR,
     HEADER_SIZE,
     KEYFILE_NAME,
+    REMOTE_KEYFILE_NAME,
     TAG_SIZE,
     VERSION,
     CryptoError,
@@ -16,12 +17,13 @@ from .crypto import (
     parse_file_header,
     redact_encrypted_path,
 )
-from .sync import RemoteEntry, SyncError
 from .state import EntryState, SyncState
+from .sync import RemoteEntry, SyncError
 from .tarkle import TarkleRemote
 
 logger = logging.getLogger("tarklone.crypto")
 REMOTE_KEYFILE = f"{ENCRYPTED_DIR}/{KEYFILE_NAME}"
+REMOTE_KEYFILE_UPLOAD = f"{ENCRYPTED_DIR}/{REMOTE_KEYFILE_NAME}"
 
 
 class EncryptedStateAdapter:
@@ -209,6 +211,17 @@ class EncryptionAdapter:
             temp = self._temp_path("legacy")
             try:
                 self.remote.download(entry, temp)
+                try:
+                    with temp.open("rb") as handle:
+                        header = handle.read(HEADER_SIZE)
+                    parse_file_header(header)
+                except CryptoError:
+                    logger.error(
+                        "Datei im encrypted-Ordner ist nicht tarklone-verschlüsselt "
+                        "und wird nicht umbenannt: %s",
+                        redact_encrypted_path(entry.path),
+                    )
+                    continue
                 self.remote.upload(temp, token_path)
                 self.remote.delete(entry)
                 existing.add(token_path)
@@ -272,8 +285,7 @@ class EncryptionAdapter:
             for entry in entries
         )
         has_keyfile = any(
-            entry.path.casefold() == REMOTE_KEYFILE.casefold()
-            and entry.kind == "file"
+            entry.kind == "file" and self.encryption.is_keyfile(entry.path)
             for entry in entries
         )
         if has_mis_cased_root and (self.encryption.enabled or has_keyfile):
@@ -282,6 +294,13 @@ class EncryptionAdapter:
                 "Der Sync wurde abgebrochen, damit keine Ciphertexte als Klartext "
                 "behandelt werden."
             )
+        # Die Tarkle-API entfernt führende Punkte. Der Keyfile heißt remote
+        # daher "tarklone-key.json"; logisch bleibt er ".tarklone-key.json".
+        for entry in entries:
+            if entry.kind == "file" and self.encryption.is_keyfile(entry.path):
+                if entry.path.casefold() != REMOTE_KEYFILE.casefold():
+                    entry.remote_path = entry.path
+                    entry.path = REMOTE_KEYFILE
         if not self.encryption.enabled:
             # Auf einem neuen Rechner kann die Schlüsseldatei remote vorhanden
             # sein. Dann nur diese und normale Dateien übertragen, aber keine
@@ -370,6 +389,13 @@ class EncryptionAdapter:
         remote_entry: RemoteEntry | None = None,
         crypto_generation: int = 1,
     ) -> RemoteEntry | None:
+        if self.encryption.is_keyfile(remote_path):
+            return self.remote.upload(
+                local_path,
+                REMOTE_KEYFILE_UPLOAD,
+                mtime=mtime,
+                remote_entry=remote_entry,
+            )
         if self.encryption.is_encrypted_path(remote_path) and not self.encryption.enabled:
             raise SyncError(
                 "Der Ordner encrypted ist für die Verschlüsselung reserviert. "

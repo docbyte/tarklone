@@ -190,6 +190,37 @@ class SyncProfile:
         return self.active_folders()
 
 
+def profile_state_id(
+    profile: SyncProfile, folder: SyncFolder | None = None
+) -> str:
+    """Stable state-database id, separated by the remote sync target.
+
+    A changed remote target must not reuse the previous state: otherwise the
+    first sync would interpret all files of the old target as remotely deleted
+    and, with deletion sync enabled, move the local files to the trash.
+    """
+    if folder is None:
+        folders = profile.active_folders()
+        folder = folders[0] if folders else None
+    base = profile.id
+    if (
+        profile.sync_mode == "multi"
+        and folder is not None
+        and folder.id != profile.id
+    ):
+        base = f"{profile.id}-{folder.id}"
+    remote = (
+        folder.remote_folder_id
+        if folder is not None
+        else profile.remote_folder_id
+    )
+    remote = remote.replace("\\", "/").strip("/")
+    if remote:
+        digest = hashlib.sha256(remote.casefold().encode("utf-8")).hexdigest()[:12]
+        base = f"{base}-remote-{digest}"
+    return base
+
+
 @dataclass
 class Settings:
     # Legacy-Einzelprofil; wird beim Laden in profiles migriert.

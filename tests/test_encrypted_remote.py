@@ -130,7 +130,7 @@ def test_encrypted_sync_roundtrip_and_password_change(tmp_path: Path) -> None:
         assert "encrypted/test.txt" not in remote.files
         assert remote.files[token_path][:5] == MAGIC
         assert b"secret data" not in remote.files[token_path]
-        assert "encrypted/.tarklone-key.json" in remote.files
+        assert "encrypted/tarklone-key.json" in remote.files
         assert "encrypted/test.txt" in state.all()
         stored_paths = raw_state.all()
         assert "encrypted/test.txt" not in stored_paths
@@ -234,7 +234,7 @@ def test_legacy_plaintext_names_are_migrated(tmp_path: Path) -> None:
 
     remote = FakeRemote()
     remote.files["encrypted/legacy.txt"] = cipher
-    remote.files["encrypted/.tarklone-key.json"] = manager.keyfile.read_bytes()
+    remote.files["encrypted/tarklone-key.json"] = manager.keyfile.read_bytes()
     adapter = EncryptionAdapter(remote, manager)
     raw_state = SyncState(tmp_path / "state.sqlite3")
     state = EncryptedStateAdapter(raw_state, manager)
@@ -311,6 +311,21 @@ def test_locked_adapter_does_not_download_ciphertext(tmp_path: Path) -> None:
                 ),
                 tmp_path / "out",
             )
+    finally:
+        adapter.close()
+
+
+def test_remote_keyfile_without_dot_is_mapped_to_local_name(tmp_path: Path) -> None:
+    manager = EncryptionManager(
+        tmp_path / "local", iterations=10_000, cache_in_keyring=False
+    )
+    manager.set_password("a-long-unique-passphrase")
+    remote = FakeRemote()
+    remote.files["encrypted/tarklone-key.json"] = manager.keyfile.read_bytes()
+    adapter = EncryptionAdapter(remote, manager)
+    try:
+        paths = {entry.path for entry in adapter.list_tree()}
+        assert "encrypted/.tarklone-key.json" in paths
     finally:
         adapter.close()
 

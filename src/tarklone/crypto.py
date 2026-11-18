@@ -20,6 +20,9 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 KEYFILE_NAME = ".tarklone-key.json"
+# Die Tarkle-API entfernt führende Punkte aus Dateinamen. Der Keyfile wird
+# deshalb remote ohne Punkt abgelegt, lokal bleibt der klassische Name.
+REMOTE_KEYFILE_NAME = "tarklone-key.json"
 ENCRYPTED_DIR = "encrypted"
 MAGIC = b"TKLE1"
 VERSION = 2
@@ -181,7 +184,11 @@ class EncryptionManager:
 
     def is_keyfile(self, path: str) -> bool:
         normalized = path.replace("\\", "/").strip("/")
-        return normalized.casefold() == f"{ENCRYPTED_DIR}/{KEYFILE_NAME}".casefold()
+        names = {
+            f"{ENCRYPTED_DIR}/{KEYFILE_NAME}".casefold(),
+            f"{ENCRYPTED_DIR}/{REMOTE_KEYFILE_NAME}".casefold(),
+        }
+        return normalized.casefold() in names
 
     def is_encrypted_path(self, path: str) -> bool:
         normalized = path.replace("\\", "/").strip("/")

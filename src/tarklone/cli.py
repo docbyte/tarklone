@@ -29,6 +29,7 @@ from .config import (
     is_workspace_key,
     load_settings,
     log_path,
+    profile_state_id,
     profile_state_path,
     save_settings,
     state_path,
@@ -497,12 +498,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                             return 2
                     remote = TarkleRemote(profile_settings, api_key)
                     adapter = EncryptionAdapter(remote, encryption)
-                    state_id = (
-                        profile.id
-                        if profile.sync_mode != "multi"
-                        or folder.id == profile.id
-                        else f"{profile.id}-{folder.id}"
-                    )
+                    state_id = profile_state_id(profile, folder)
                     state_file = profile_state_path(state_id)
                     existing_states = (
                         list(state_file.parent.glob("*.sqlite3"))
